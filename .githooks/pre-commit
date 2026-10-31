@@ -12,11 +12,14 @@ if ! git diff --cached --name-only | grep -qE '^(src/|assets/|build\.rs$|Cargo\.
     exit 0
 fi
 
+# The build uses the working tree, so unstaged edits to build inputs would end
+# up in dist/zap.exe without being in the commit (and in the version bump).
+if ! git diff --quiet -- src assets build.rs Cargo.toml Cargo.lock; then
+    echo "pre-commit: src/, assets/, build.rs or Cargo files have unstaged changes that would be built into dist/zap.exe but not committed. Stage or stash them." >&2
+    exit 1
+fi
+
 if ! git diff --cached -U0 -- Cargo.toml | grep -qE '^\+version = '; then
-    if ! git diff --quiet -- Cargo.toml; then
-        echo "pre-commit: Cargo.toml has unstaged changes; stage or stash them so the version bump doesn't pick them up." >&2
-        exit 1
-    fi
     old=$(sed -n 's/^version = "\([0-9]*\.[0-9]*\.[0-9]*\)"$/\1/p' Cargo.toml | head -n 1)
     if [ -z "$old" ]; then
         echo "pre-commit: couldn't read the version from Cargo.toml." >&2

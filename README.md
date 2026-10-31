@@ -6,7 +6,7 @@ Written in Rust: one small, self-contained exe with no runtime to install.
 
 ## Download
 
-The latest build is always [`dist/zap.exe`](dist/zap.exe) in this repo. It's a single file with nothing to install; copy it somewhere permanent (for example `%LOCALAPPDATA%\Programs\Zap\zap.exe`) and run it from there. The first run turns on Start with Windows for that copy.
+The latest build is always [`dist/zap.exe`](dist/zap.exe) in this repo. It needs Windows 10 version 1703 (2017) or later, or Windows 11. It's a single file with nothing to install; copy it somewhere permanent (for example `%LOCALAPPDATA%\Programs\Zap\zap.exe`) and run it from there. The first run turns on Start with Windows for that copy.
 
 To update, quit Zap (right-click → Exit), copy the new `dist/zap.exe` over the old one and start it again. Your settings and autostart carry over because the path hasn't changed.
 
@@ -20,7 +20,7 @@ Zap lives in the system tray as a white lightning bolt.
 - **Right-click** for the menu:
   - **Pause / Resume**
   - **Keep display on** (on by default): also stop the screen from turning off. On Modern Standby laptops a screen that turns off looks like sleep, which is why this starts on.
-  - **Keep Teams active** (on by default): stops Microsoft Teams (and similar apps) showing you as Away. Once you haven't touched the keyboard or mouse for 99 seconds, Zap presses F15, and again every 99 seconds until you're back. F15 is a key almost no keyboard has and nothing uses, so it doesn't type or trigger anything. It never fires while you're using the PC, and can't while the screen is locked, so it works best with "Keep display on". Check your workplace's policy on activity tools before relying on it.
+  - **Keep Teams active** (on by default): stops Microsoft Teams (and similar apps) showing you as Away. Once you haven't touched the keyboard or mouse for 99 seconds, Zap presses F15, and again every 99 seconds until you're back. F15 is a key almost no keyboard has and nothing uses, so it doesn't type or trigger anything. It never fires while you're using the PC. It can't work while the screen is locked, or while a window running as administrator is in front, because Windows blocks simulated input in both cases. Windows counts the key press as activity too, so while this is on and Zap isn't paused, your screen stays on and won't idle-lock even with "Keep display on" unticked; pause Zap or untick this if you want the screen to turn off. Check your workplace's policy on activity tools before relying on it.
   - **Start with Windows** (on by default): runs `zap.exe` when you sign in, using the standard per-user `Run` registry entry, so it also appears in Task Manager's Startup apps. The very first time Zap runs, it turns this on for that copy of the exe, so run it first from where you want to keep it. After that your choice sticks, including turning it off in Task Manager. If you move the exe, tick it again to point at the new location.
   - **About Zap**
   - **Exit**: asks for confirmation (unless paused), then lets the computer sleep again.
@@ -41,7 +41,7 @@ Only one copy runs at a time. Your menu choices are remembered between runs; pau
 | Keep Teams active | `HKCU\Software\Zap\KeepTeamsActive` (DWORD) |
 | Start with Windows | `HKCU\Software\Microsoft\Windows\CurrentVersion\Run\Zap`, plus your last choice in `HKCU\Software\Zap\StartWithWindows` (DWORD; missing means Zap hasn't run yet) |
 
-To remove every trace of Zap, untick Start with Windows, quit it, delete `HKCU\Software\Zap` and delete the exe.
+To remove every trace of Zap, tick Start with Windows if it isn't already, then untick it (that removes the startup entry and any Task Manager on/off flag), quit Zap, delete `HKCU\Software\Zap` and delete the exe.
 
 ## Building
 

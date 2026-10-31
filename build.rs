@@ -46,8 +46,10 @@ END
 
     let out = PathBuf::from(std::env::var("OUT_DIR").unwrap()).join("zap.rc");
     std::fs::write(&out, rc).unwrap();
+    // Required, not optional: without the resources the exe has no icons and
+    // exits at startup, so a missing resource compiler must fail the build.
     embed_resource::compile(&out, embed_resource::NONE)
-        .manifest_optional()
+        .manifest_required()
         .unwrap();
 
     println!("cargo:rerun-if-changed=assets/zap.ico");

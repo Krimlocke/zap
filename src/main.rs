@@ -60,7 +60,6 @@ fn main() {
     // stretches the tray icon, which blurs it.
     unsafe { SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) };
 
-    // Equivalent of the original's UniqueInstance component.
     if !acquire_single_instance() {
         message_box(
             &format!("{APP_NAME} is already running.\n\nLook for its icon in the system tray."),
@@ -126,6 +125,8 @@ fn main() {
     let mut msg: MSG = unsafe { std::mem::zeroed() };
     while unsafe { GetMessageW(&mut msg, null_mut(), 0, 0) } > 0 {
         // Our thread timers have no window; tray-icon's timers belong to its window.
+        // Dispatching a windowless timer message is a no-op, and falling through
+        // still drains any tray click queued while a dialog was open.
         if msg.message == WM_TIMER && msg.hwnd.is_null() {
             if msg.wParam == zap.teams_timer {
                 if zap.teams_tick() {
@@ -134,7 +135,6 @@ fn main() {
             } else if msg.wParam == zap.trim_timer {
                 zap.trim_memory();
             }
-            continue;
         }
 
         unsafe {
@@ -146,11 +146,20 @@ fn main() {
         while let Ok(event) = TrayIconEvent::receiver().try_recv() {
             had_events = true;
             match event {
+                // On press, not release: a double-click sends two releases but
+                // only one press, so it would otherwise pause and resume.
                 TrayIconEvent::Click {
                     button: MouseButton::Left,
-                    button_state: MouseButtonState::Up,
+                    button_state: MouseButtonState::Down,
                     ..
                 } => zap.toggle_pause(),
+                // The menu opens on release, so refresh the tick first in case
+                // the entry was changed in Task Manager while Zap was running.
+                TrayIconEvent::Click {
+                    button: MouseButton::Right,
+                    button_state: MouseButtonState::Down,
+                    ..
+                } => start_with_windows.set_checked(starts_with_windows()),
                 // Display scaling may have changed since the icon was loaded.
                 TrayIconEvent::Enter { .. } => zap.refresh_icon_size(),
                 _ => {}
