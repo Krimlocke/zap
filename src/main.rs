@@ -15,7 +15,9 @@ use windows_sys::Win32::System::Registry::{
     RRF_RT_REG_BINARY, RRF_RT_REG_DWORD, RRF_RT_REG_SZ,
 };
 use windows_sys::Win32::System::SystemInformation::GetTickCount;
-use windows_sys::Win32::System::Threading::CreateMutexW;
+use windows_sys::Win32::System::Threading::{
+    CreateMutexW, GetCurrentProcess, SetProcessWorkingSetSize,
+};
 use windows_sys::Win32::UI::HiDpi::{
     GetDpiForWindow, GetSystemMetricsForDpi, SetProcessDpiAwarenessContext,
     DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
@@ -44,6 +46,8 @@ const START_WITH_WINDOWS_VALUE: &str = "StartWithWindows";
 /// nudge it once input has been idle for 4, checking every 30 seconds.
 const TEAMS_IDLE_LIMIT_MS: u32 = 4 * 60 * 1000;
 const TEAMS_CHECK_INTERVAL_MS: u32 = 30 * 1000;
+/// How long Zap waits after startup or the last click before trimming its memory.
+const TRIM_DELAY_MS: u32 = 5 * 1000;
 /// Per-user autostart entry, the same one Task Manager's Startup apps lists.
 const RUN_KEY: &str = "Software\\Microsoft\\Windows\\CurrentVersion\\Run";
 /// Where Task Manager records an autostart entry the user has disabled.
@@ -112,16 +116,22 @@ fn main() {
         paused: false,
         icon_size,
         teams_timer: 0,
+        trim_timer: 0,
     };
     zap.apply();
+    zap.schedule_trim();
 
     // tray-icon needs a Win32 message loop on this thread. Tray and menu events
     // are queued while a message is dispatched, so drain them after each one.
     let mut msg: MSG = unsafe { std::mem::zeroed() };
     while unsafe { GetMessageW(&mut msg, null_mut(), 0, 0) } > 0 {
-        // Our thread timer has no window; tray-icon's timers belong to its window.
-        if msg.message == WM_TIMER && msg.hwnd.is_null() && msg.wParam == zap.teams_timer {
-            nudge_if_idle();
+        // Our thread timers have no window; tray-icon's timers belong to its window.
+        if msg.message == WM_TIMER && msg.hwnd.is_null() {
+            if msg.wParam == zap.teams_timer && nudge_if_idle() {
+                zap.schedule_trim();
+            } else if msg.wParam == zap.trim_timer {
+                zap.trim_memory();
+            }
             continue;
         }
 
@@ -130,7 +140,9 @@ fn main() {
             DispatchMessageW(&msg);
         }
 
+        let mut had_events = false;
         while let Ok(event) = TrayIconEvent::receiver().try_recv() {
+            had_events = true;
             match event {
                 TrayIconEvent::Click {
                     button: MouseButton::Left,
@@ -144,6 +156,7 @@ fn main() {
         }
 
         while let Ok(event) = MenuEvent::receiver().try_recv() {
+            had_events = true;
             if event.id == *zap.pause.id() {
                 zap.toggle_pause();
             } else if event.id == *zap.keep_display_on.id() {
@@ -163,6 +176,10 @@ fn main() {
                 unsafe { PostQuitMessage(0) };
             }
         }
+
+        if had_events {
+            zap.schedule_trim();
+        }
     }
 
     // Hand sleep control back to Windows. This also happens when the process exits.
@@ -178,9 +195,28 @@ struct Zap {
     icon_size: u32,
     /// Thread timer ID for the Teams idle check, or 0 when it isn't running.
     teams_timer: usize,
+    /// One-shot thread timer ID for the next memory trim, or 0 when none is due.
+    trim_timer: usize,
 }
 
 impl Zap {
+    /// Trims memory once Zap has been quiet for TRIM_DELAY_MS. Calling it again
+    /// before then restarts the countdown, so a burst of clicks trims once.
+    fn schedule_trim(&mut self) {
+        self.trim_timer = unsafe { SetTimer(null_mut(), self.trim_timer, TRIM_DELAY_MS, None) };
+    }
+
+    /// Lets Windows move Zap's idle pages out of RAM. They page back in
+    /// within microseconds when next needed. This is what keeps Task Manager's
+    /// "Memory" figure for Zap well under 1 MB.
+    fn trim_memory(&mut self) {
+        unsafe {
+            KillTimer(null_mut(), self.trim_timer);
+            SetProcessWorkingSetSize(GetCurrentProcess(), usize::MAX, usize::MAX);
+        }
+        self.trim_timer = 0;
+    }
+
     fn toggle_pause(&mut self) {
         self.paused = !self.paused;
         self.apply();
@@ -239,16 +275,17 @@ fn set_awake(keep_display_on: bool) {
 /// Presses and releases F15 if there has been no keyboard or mouse input for
 /// TEAMS_IDLE_LIMIT_MS, which resets the idle time Teams watches. Almost no
 /// keyboard has F15 and nothing uses it, so it doesn't type or trigger anything.
-fn nudge_if_idle() {
+/// Returns true if it sent the key press.
+fn nudge_if_idle() -> bool {
     let mut info = LASTINPUTINFO {
         cbSize: std::mem::size_of::<LASTINPUTINFO>() as u32,
         dwTime: 0,
     };
     if unsafe { GetLastInputInfo(&mut info) } == 0 {
-        return;
+        return false;
     }
     if unsafe { GetTickCount() }.wrapping_sub(info.dwTime) < TEAMS_IDLE_LIMIT_MS {
-        return;
+        return false;
     }
 
     let key = |flags| INPUT {
@@ -264,13 +301,14 @@ fn nudge_if_idle() {
         },
     };
     let inputs = [key(0), key(KEYEVENTF_KEYUP)];
-    unsafe {
+    let sent = unsafe {
         SendInput(
             inputs.len() as u32,
             inputs.as_ptr(),
             std::mem::size_of::<INPUT>() as i32,
         )
     };
+    sent > 0
 }
 
 /// Returns a saved on/off setting, or None if it has never been set.

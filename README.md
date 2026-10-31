@@ -31,7 +31,7 @@ Only one copy runs at a time. Your menu choices are remembered between runs; pau
 
 - **Staying awake:** Zap calls the Win32 `SetThreadExecutionState` API with `ES_CONTINUOUS | ES_SYSTEM_REQUIRED` (plus `ES_DISPLAY_REQUIRED` when "Keep display on" is ticked). Pausing clears the request.
 - **Teams:** this doesn't count as user activity, so on its own it doesn't stop Teams going Away. "Keep Teams active" adds a 30-second timer that checks `GetLastInputInfo` and sends an F15 key press with `SendInput` once input has been idle for 4 minutes. Teams goes Away after 5. The timer only exists while the option is on and Zap isn't paused.
-- **Footprint:** Zap waits on the Windows message queue, so it uses no CPU while idle (about 2 MB of memory).
+- **Footprint:** Zap waits on the Windows message queue, so it uses no CPU while idle. Five seconds after starting, and after each click or menu action, it lets Windows move its idle memory out of RAM (`SetProcessWorkingSetSize`), so Task Manager shows it at roughly 60–100 KB, briefly a few hundred KB while you use it. Those pages come back instantly when needed, so nothing slows down.
 
 ### Where settings are stored
 
