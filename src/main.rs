@@ -40,6 +40,8 @@ const ICON_PAUSED: u16 = 2;
 const SETTINGS_KEY: &str = "Software\\Zap";
 const KEEP_DISPLAY_ON_VALUE: &str = "KeepDisplayOn";
 const KEEP_TEAMS_ACTIVE_VALUE: &str = "KeepTeamsActive";
+/// The user's last Start with Windows choice. Its absence marks a first run.
+const START_WITH_WINDOWS_VALUE: &str = "StartWithWindows";
 /// Teams shows you as Away after 5 minutes without keyboard or mouse input, so
 /// nudge it once input has been idle for 4, checking every 30 seconds.
 const TEAMS_IDLE_LIMIT_MS: u32 = 4 * 60 * 1000;
@@ -67,7 +69,14 @@ fn main() {
 
     // On by default: on Modern Standby laptops a dark screen looks like sleep.
     let display = load_setting(KEEP_DISPLAY_ON_VALUE).unwrap_or(true);
-    let teams = load_setting(KEEP_TEAMS_ACTIVE_VALUE).unwrap_or(false);
+    let teams = load_setting(KEEP_TEAMS_ACTIVE_VALUE).unwrap_or(true);
+    // Start with Windows defaults to on, applied once on the first run. After
+    // that the Run entry is left alone, so unticking it (here or in Task
+    // Manager) sticks, and test copies run from elsewhere don't take it over.
+    if load_setting(START_WITH_WINDOWS_VALUE).is_none() {
+        set_start_with_windows(true);
+        save_setting(START_WITH_WINDOWS_VALUE, true);
+    }
     let pause = MenuItem::new("Pause", true, None);
     let keep_display_on = CheckMenuItem::new("Keep display on", true, display, None);
     let keep_teams_active = CheckMenuItem::new("Keep Teams active", true, teams, None);
@@ -149,6 +158,7 @@ fn main() {
                 set_start_with_windows(start_with_windows.is_checked());
                 // Show what actually took effect, in case the registry write failed.
                 start_with_windows.set_checked(starts_with_windows());
+                save_setting(START_WITH_WINDOWS_VALUE, start_with_windows.is_checked());
             } else if event.id == *about.id() {
                 show_about();
             } else if event.id == *exit.id() && (zap.paused || confirm_exit()) {

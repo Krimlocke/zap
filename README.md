@@ -16,8 +16,8 @@ Zap lives in the system tray as a white lightning bolt.
 - **Right-click** for the menu:
   - **Pause / Resume**
   - **Keep display on** (on by default): also stop the screen from turning off. On Modern Standby laptops a screen that turns off looks like sleep, which is why this starts on.
-  - **Keep Teams active** (off by default): stops Microsoft Teams (and similar apps) showing you as Away. After 4 minutes with no keyboard or mouse input, Zap presses F15, a key almost no keyboard has and nothing uses, so it doesn't type or trigger anything. It never fires while you're using the PC, and can't while the screen is locked, so it works best with "Keep display on". Check your workplace's policy on activity tools before relying on it.
-  - **Start with Windows**: runs this copy of `zap.exe` when you sign in, using the standard per-user `Run` registry entry, so it also appears in Task Manager's Startup apps. Turning it off there shows here too. If you move the exe, tick it again to point at the new location.
+  - **Keep Teams active** (on by default): stops Microsoft Teams (and similar apps) showing you as Away. After 4 minutes with no keyboard or mouse input, Zap presses F15, a key almost no keyboard has and nothing uses, so it doesn't type or trigger anything. It never fires while you're using the PC, and can't while the screen is locked, so it works best with "Keep display on". Check your workplace's policy on activity tools before relying on it.
+  - **Start with Windows** (on by default): runs `zap.exe` when you sign in, using the standard per-user `Run` registry entry, so it also appears in Task Manager's Startup apps. The very first time Zap runs, it turns this on for that copy of the exe, so run it first from where you want to keep it. After that your choice sticks, including turning it off in Task Manager. If you move the exe, tick it again to point at the new location.
   - **About Zap**
   - **Exit**: asks for confirmation (unless paused), then lets the computer sleep again.
 
@@ -35,7 +35,7 @@ Only one copy runs at a time. Your menu choices are remembered between runs; pau
 |---|---|
 | Keep display on | `HKCU\Software\Zap\KeepDisplayOn` (DWORD) |
 | Keep Teams active | `HKCU\Software\Zap\KeepTeamsActive` (DWORD) |
-| Start with Windows | `HKCU\Software\Microsoft\Windows\CurrentVersion\Run\Zap` |
+| Start with Windows | `HKCU\Software\Microsoft\Windows\CurrentVersion\Run\Zap`, plus your last choice in `HKCU\Software\Zap\StartWithWindows` (DWORD; missing means Zap hasn't run yet) |
 
 To remove every trace of Zap, untick Start with Windows, quit it, delete `HKCU\Software\Zap` and delete the exe.
 
@@ -70,7 +70,7 @@ git config core.hooksPath .githooks
 
 - A tray menu replaces the settings window, and clicking the icon pauses or resumes.
 - "Keep display on" is on by default and remembered between runs.
-- New: Keep Teams active, and Start with Windows.
+- New: Keep Teams active and Start with Windows, both on by default.
 - No Lazarus/LCL runtime: one small, self-contained executable.
 
 ## Credits
