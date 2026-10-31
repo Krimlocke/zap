@@ -1,0 +1,33 @@
+#!/bin/sh
+# Rebuilds the release exe and adds it to the commit as dist/zap.exe whenever
+# the commit touches anything that ends up in the binary. A failed build stops
+# the commit, so the committed exe always matches the committed code.
+#
+# Enable once per clone:  git config core.hooksPath .githooks
+
+if ! git diff --cached --name-only | grep -qE '^(src/|assets/|build\.rs$|Cargo\.(toml|lock)$)'; then
+    exit 0
+fi
+
+# Git GUIs don't always inherit the shell PATH, so add the usual tool locations.
+PATH="$HOME/.cargo/bin:$PATH"
+for dir in "$LOCALAPPDATA"/Microsoft/WinGet/Packages/BrechtSanders.WinLibs*/mingw64/bin; do
+    [ -d "$dir" ] && PATH="$dir:$PATH"
+done
+export PATH
+
+echo "pre-commit: building release exe..."
+if ! cargo build --release --quiet; then
+    echo "pre-commit: build failed, commit stopped." >&2
+    echo "  If Zap is running from the build folder, quit it and try again." >&2
+    exit 1
+fi
+
+target_dir=$(cargo metadata --format-version 1 --no-deps | sed -n 's/.*"target_directory":"\([^"]*\)".*/\1/p' | sed 's/\\\\/\//g')
+mkdir -p dist
+if ! cp "$target_dir/release/zap.exe" dist/zap.exe; then
+    echo "pre-commit: couldn't overwrite dist/zap.exe. Quit Zap if it's running from dist/ and try again." >&2
+    exit 1
+fi
+git add dist/zap.exe
+echo "pre-commit: dist/zap.exe updated."

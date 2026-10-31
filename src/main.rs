@@ -7,7 +7,7 @@
 use std::ptr::null_mut;
 
 use tray_icon::menu::{CheckMenuItem, Menu, MenuEvent, MenuItem, PredefinedMenuItem};
-use tray_icon::{Icon, TrayIconBuilder};
+use tray_icon::{Icon, MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent};
 use windows_sys::Win32::Foundation::{GetLastError, ERROR_ALREADY_EXISTS, ERROR_SUCCESS};
 use windows_sys::Win32::System::Power::{
     SetThreadExecutionState, ES_CONTINUOUS, ES_DISPLAY_REQUIRED, ES_SYSTEM_REQUIRED,
@@ -17,17 +17,19 @@ use windows_sys::Win32::System::Registry::{
 };
 use windows_sys::Win32::System::Threading::CreateMutexW;
 use windows_sys::Win32::UI::HiDpi::{
-    SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
+    GetDpiForWindow, GetSystemMetricsForDpi, SetProcessDpiAwarenessContext,
+    DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    DispatchMessageW, GetMessageW, GetSystemMetrics, MessageBoxW, PostQuitMessage,
-    TranslateMessage, IDYES, MB_DEFBUTTON2, MB_ICONINFORMATION, MB_ICONWARNING, MB_OK, MB_YESNO,
-    MSG, SM_CXSMICON, SM_CYSMICON,
+    DispatchMessageW, FindWindowW, GetMessageW, GetSystemMetrics, MessageBoxW, PostQuitMessage,
+    TranslateMessage, IDYES, MB_DEFBUTTON2, MB_ICONINFORMATION, MB_ICONWARNING, MB_OK,
+    MB_SETFOREGROUND, MB_YESNO, MSG, SM_CXSMICON,
 };
 
 const APP_NAME: &str = "Zap";
-/// Resource ID of assets/zap.ico, embedded by build.rs via zap.rc.
-const ICON_RESOURCE_ID: u16 = 1;
+/// Icon resource IDs, embedded by build.rs.
+const ICON_ACTIVE: u16 = 1;
+const ICON_PAUSED: u16 = 2;
 /// Settings live under HKEY_CURRENT_USER\Software\Zap.
 const SETTINGS_KEY: &str = "Software\\Zap";
 const KEEP_DISPLAY_ON_VALUE: &str = "KeepDisplayOn";
@@ -48,12 +50,14 @@ fn main() {
 
     // On by default: on Modern Standby laptops a dark screen looks like sleep.
     let display = load_keep_display_on().unwrap_or(true);
+    let pause = MenuItem::new("Pause", true, None);
     let keep_display_on = CheckMenuItem::new("Keep display on", true, display, None);
     let about = MenuItem::new("About Zap", true, None);
     let exit = MenuItem::new("Exit", true, None);
 
     let menu = Menu::new();
     menu.append_items(&[
+        &pause,
         &keep_display_on,
         &PredefinedMenuItem::separator(),
         &about,
@@ -61,18 +65,26 @@ fn main() {
     ])
     .expect("failed to build tray menu");
 
+    // Left click toggles pause; right click opens the menu.
+    let icon_size = tray_icon_size();
     let tray = TrayIconBuilder::new()
         .with_menu(Box::new(menu))
-        .with_menu_on_left_click(true)
-        .with_tooltip(tooltip(display))
-        .with_icon(load_icon())
+        .with_menu_on_left_click(false)
+        .with_icon(load_icon(ICON_ACTIVE, icon_size))
         .build()
         .expect("failed to create tray icon");
 
-    set_awake(display);
+    let mut zap = Zap {
+        tray,
+        pause,
+        keep_display_on,
+        paused: false,
+        icon_size,
+    };
+    zap.apply();
 
-    // tray-icon needs a Win32 message loop on this thread. Menu events are queued
-    // while a message is dispatched, so drain them after each one.
+    // tray-icon needs a Win32 message loop on this thread. Tray and menu events
+    // are queued while a message is dispatched, so drain them after each one.
     let mut msg: MSG = unsafe { std::mem::zeroed() };
     while unsafe { GetMessageW(&mut msg, null_mut(), 0, 0) } > 0 {
         unsafe {
@@ -80,15 +92,28 @@ fn main() {
             DispatchMessageW(&msg);
         }
 
+        while let Ok(event) = TrayIconEvent::receiver().try_recv() {
+            match event {
+                TrayIconEvent::Click {
+                    button: MouseButton::Left,
+                    button_state: MouseButtonState::Up,
+                    ..
+                } => zap.toggle_pause(),
+                // Display scaling may have changed since the icon was loaded.
+                TrayIconEvent::Enter { .. } => zap.refresh_icon_size(),
+                _ => {}
+            }
+        }
+
         while let Ok(event) = MenuEvent::receiver().try_recv() {
-            if event.id == *keep_display_on.id() {
-                let display = keep_display_on.is_checked();
-                set_awake(display);
-                save_keep_display_on(display);
-                let _ = tray.set_tooltip(Some(tooltip(display)));
+            if event.id == *zap.pause.id() {
+                zap.toggle_pause();
+            } else if event.id == *zap.keep_display_on.id() {
+                save_keep_display_on(zap.keep_display_on.is_checked());
+                zap.apply();
             } else if event.id == *about.id() {
                 show_about();
-            } else if event.id == *exit.id() && confirm_exit() {
+            } else if event.id == *exit.id() && (zap.paused || confirm_exit()) {
                 unsafe { PostQuitMessage(0) };
             }
         }
@@ -96,6 +121,51 @@ fn main() {
 
     // Hand sleep control back to Windows. This also happens when the process exits.
     unsafe { SetThreadExecutionState(ES_CONTINUOUS) };
+}
+
+struct Zap {
+    tray: TrayIcon,
+    pause: MenuItem,
+    keep_display_on: CheckMenuItem,
+    paused: bool,
+    icon_size: u32,
+}
+
+impl Zap {
+    fn toggle_pause(&mut self) {
+        self.paused = !self.paused;
+        self.apply();
+    }
+
+    /// Brings the power request, icon, tooltip and menu in line with the current state.
+    fn apply(&self) {
+        let display = self.keep_display_on.is_checked();
+        if self.paused {
+            unsafe { SetThreadExecutionState(ES_CONTINUOUS) };
+        } else {
+            set_awake(display);
+        }
+
+        let _ = self.tray.set_icon(Some(load_icon(self.icon_id(), self.icon_size)));
+        let _ = self.tray.set_tooltip(Some(tooltip(self.paused, display)));
+        self.pause.set_text(if self.paused { "Resume" } else { "Pause" });
+    }
+
+    fn refresh_icon_size(&mut self) {
+        let size = tray_icon_size();
+        if size != self.icon_size {
+            self.icon_size = size;
+            let _ = self.tray.set_icon(Some(load_icon(self.icon_id(), size)));
+        }
+    }
+
+    fn icon_id(&self) -> u16 {
+        if self.paused {
+            ICON_PAUSED
+        } else {
+            ICON_ACTIVE
+        }
+    }
 }
 
 /// Tells Windows the system (and optionally the display) is in use until further notice.
@@ -145,20 +215,36 @@ fn save_keep_display_on(on: bool) {
     };
 }
 
-fn tooltip(keep_display_on: bool) -> String {
-    if keep_display_on {
-        format!("{APP_NAME}: keeping your PC and display awake")
+fn tooltip(paused: bool, keep_display_on: bool) -> String {
+    if paused {
+        format!("{APP_NAME}: paused, your PC can sleep (click to resume)")
+    } else if keep_display_on {
+        format!("{APP_NAME}: keeping your PC and display awake (click to pause)")
     } else {
-        format!("{APP_NAME}: keeping your PC awake")
+        format!("{APP_NAME}: keeping your PC awake (click to pause)")
     }
 }
 
-/// Loads the embedded icon at the tray's size so Windows picks the hand-rendered
+/// The small-icon size for the taskbar's monitor, which can differ from the
+/// primary monitor and changes when the user changes display scaling.
+fn tray_icon_size() -> u32 {
+    let class = wide("Shell_TrayWnd");
+    let size = unsafe {
+        let taskbar = FindWindowW(class.as_ptr(), std::ptr::null());
+        let dpi = if taskbar.is_null() { 0 } else { GetDpiForWindow(taskbar) };
+        if dpi == 0 {
+            GetSystemMetrics(SM_CXSMICON)
+        } else {
+            GetSystemMetricsForDpi(SM_CXSMICON, dpi)
+        }
+    };
+    size.max(16) as u32
+}
+
+/// Loads an embedded icon at the given size so Windows picks the hand-rendered
 /// image for that size rather than shrinking a large one.
-fn load_icon() -> Icon {
-    let size = unsafe { (GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON)) };
-    Icon::from_resource(ICON_RESOURCE_ID, Some((size.0 as u32, size.1 as u32)))
-        .expect("embedded icon is missing")
+fn load_icon(resource_id: u16, size: u32) -> Icon {
+    Icon::from_resource(resource_id, Some((size, size))).expect("embedded icon is missing")
 }
 
 /// Returns false if another copy of Zap already holds the named mutex.
@@ -183,17 +269,26 @@ fn show_about() {
              Based on Caffeine by Kyle Leong (\u{a9} 2020):\n\
              https://github.com/kyleleong/caffeine\n\n\
              Zap prevents your computer from going to sleep while it is running. \
-             Use the tray icon to keep the display on too, or to quit.",
+             Click the tray icon to pause or resume; right-click it for options.",
             env!("CARGO_PKG_VERSION")
         ),
         MB_OK | MB_ICONINFORMATION,
     );
 }
 
+/// Shows a message box. MB_SETFOREGROUND stops it opening behind other windows,
+/// since a tray app has no window of its own to own the dialog.
 fn message_box(text: &str, style: u32) -> i32 {
     let text = wide(text);
     let caption = wide(APP_NAME);
-    unsafe { MessageBoxW(null_mut(), text.as_ptr(), caption.as_ptr(), style) }
+    unsafe {
+        MessageBoxW(
+            null_mut(),
+            text.as_ptr(),
+            caption.as_ptr(),
+            style | MB_SETFOREGROUND,
+        )
+    }
 }
 
 fn wide(s: &str) -> Vec<u16> {

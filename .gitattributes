@@ -1,0 +1,4 @@
+# Hooks run under sh, which chokes on CRLF.
+.githooks/* text eol=lf
+*.exe binary
+*.ico binary
