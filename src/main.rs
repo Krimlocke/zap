@@ -70,6 +70,7 @@ fn main() {
     let tray = TrayIconBuilder::new()
         .with_menu(Box::new(menu))
         .with_menu_on_left_click(false)
+        .with_tooltip(APP_NAME)
         .with_icon(load_icon(ICON_ACTIVE, icon_size))
         .build()
         .expect("failed to create tray icon");
@@ -137,17 +138,15 @@ impl Zap {
         self.apply();
     }
 
-    /// Brings the power request, icon, tooltip and menu in line with the current state.
+    /// Brings the power request, icon and menu in line with the current state.
     fn apply(&self) {
-        let display = self.keep_display_on.is_checked();
         if self.paused {
             unsafe { SetThreadExecutionState(ES_CONTINUOUS) };
         } else {
-            set_awake(display);
+            set_awake(self.keep_display_on.is_checked());
         }
 
         let _ = self.tray.set_icon(Some(load_icon(self.icon_id(), self.icon_size)));
-        let _ = self.tray.set_tooltip(Some(tooltip(self.paused, display)));
         self.pause.set_text(if self.paused { "Resume" } else { "Pause" });
     }
 
@@ -213,16 +212,6 @@ fn save_keep_display_on(on: bool) {
             std::mem::size_of::<u32>() as u32,
         )
     };
-}
-
-fn tooltip(paused: bool, keep_display_on: bool) -> String {
-    if paused {
-        format!("{APP_NAME}: paused, your PC can sleep (click to resume)")
-    } else if keep_display_on {
-        format!("{APP_NAME}: keeping your PC and display awake (click to pause)")
-    } else {
-        format!("{APP_NAME}: keeping your PC awake (click to pause)")
-    }
 }
 
 /// The small-icon size for the taskbar's monitor, which can differ from the
