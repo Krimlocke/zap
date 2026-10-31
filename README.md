@@ -2,7 +2,7 @@
 
 A small Windows tray utility that keeps your computer from going to sleep, without changing Windows' power settings. Pause or quit it and normal sleep behaviour returns.
 
-Zap is a Rust rewrite of [Caffeine](https://github.com/kyleleong/caffeine) by Kyle Leong, originally written in Object Pascal with Lazarus.
+Written in Rust: one small, self-contained exe with no runtime to install.
 
 ## Download
 
@@ -29,7 +29,7 @@ Only one copy runs at a time. Your menu choices are remembered between runs; pau
 
 ## How it works
 
-- **Staying awake:** Zap calls the Win32 `SetThreadExecutionState` API with `ES_CONTINUOUS | ES_SYSTEM_REQUIRED` (plus `ES_DISPLAY_REQUIRED` when "Keep display on" is ticked), the same approach as Caffeine. Pausing clears the request.
+- **Staying awake:** Zap calls the Win32 `SetThreadExecutionState` API with `ES_CONTINUOUS | ES_SYSTEM_REQUIRED` (plus `ES_DISPLAY_REQUIRED` when "Keep display on" is ticked). Pausing clears the request.
 - **Teams:** this doesn't count as user activity, so on its own it doesn't stop Teams going Away. "Keep Teams active" adds a 30-second timer that checks `GetLastInputInfo` and sends an F15 key press with `SendInput` once input has been idle for 4 minutes. Teams goes Away after 5. The timer only exists while the option is on and Zap isn't paused.
 - **Footprint:** Zap waits on the Windows message queue, so it uses no CPU while idle (about 2 MB of memory).
 
@@ -70,13 +70,10 @@ Enable the hook once per clone:
 git config core.hooksPath .githooks
 ```
 
-## Differences from Caffeine
+## License
 
-- A tray menu replaces the settings window, and clicking the icon pauses or resumes.
-- "Keep display on" is on by default and remembered between runs.
-- New: Keep Teams active and Start with Windows, both on by default.
-- No Lazarus/LCL runtime: one small, self-contained executable.
+MIT © 2026 Scott Buglar. See [LICENSE](LICENSE).
 
 ## Credits
 
-Based on Caffeine © 2020 Kyle Leong, MIT licensed.
+Inspired by [Caffeine](https://github.com/kyleleong/caffeine) by Kyle Leong.

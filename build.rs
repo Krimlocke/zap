@@ -30,7 +30,7 @@ BEGIN
       VALUE "FileDescription", "Zap"
       VALUE "FileVersion", "{version}"
       VALUE "InternalName", "zap"
-      VALUE "LegalCopyright", "MIT License. Based on Caffeine, (c) 2020 Kyle Leong"
+      VALUE "LegalCopyright", "Copyright (c) 2026 Scott Buglar. MIT License."
       VALUE "OriginalFilename", "zap.exe"
       VALUE "ProductName", "Zap"
       VALUE "ProductVersion", "{version}"

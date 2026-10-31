@@ -1,6 +1,4 @@
 //! Zap: keeps Windows awake while it runs in the system tray.
-//!
-//! Rust rewrite of Caffeine, https://github.com/kyleleong/caffeine (Object Pascal / Lazarus).
 
 #![windows_subsystem = "windows"]
 
@@ -436,7 +434,7 @@ fn acquire_single_instance() -> bool {
 
 fn confirm_exit() -> bool {
     message_box(
-        "Are you sure you want to quit?\n\nThis will allow your computer to sleep.",
+        "Quit Zap?\n\nYour PC will be able to sleep again.",
         MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2,
     ) == IDYES
 }
@@ -445,8 +443,7 @@ fn show_about() {
     message_box(
         &format!(
             "{APP_NAME} v{}\n\
-             Based on Caffeine by Kyle Leong (\u{a9} 2020):\n\
-             https://github.com/kyleleong/caffeine\n\n\
+             \u{a9} 2026 Scott Buglar\n\n\
              Zap prevents your computer from going to sleep while it is running. \
              Click the tray icon to pause or resume; right-click it for options.",
             env!("CARGO_PKG_VERSION")
