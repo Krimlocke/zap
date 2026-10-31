@@ -15,16 +15,29 @@ Zap lives in the system tray as a white lightning bolt.
 - **Click** the icon to pause or resume. While paused the bolt is dimmed, the tooltip reads "Zap: inactive" (otherwise "Zap: active"), and your PC sleeps normally.
 - **Right-click** for the menu:
   - **Pause / Resume**
-  - **Keep display on** (on by default): also stop the screen from turning off. Your choice is remembered in `HKEY_CURRENT_USER\Software\Zap`. On Modern Standby laptops a screen that turns off looks like sleep, which is why this starts on.
+  - **Keep display on** (on by default): also stop the screen from turning off. On Modern Standby laptops a screen that turns off looks like sleep, which is why this starts on.
+  - **Keep Teams active** (off by default): stops Microsoft Teams (and similar apps) showing you as Away. After 4 minutes with no keyboard or mouse input, Zap presses F15, a key almost no keyboard has and nothing uses, so it doesn't type or trigger anything. It never fires while you're using the PC, and can't while the screen is locked, so it works best with "Keep display on". Check your workplace's policy on activity tools before relying on it.
   - **Start with Windows**: runs this copy of `zap.exe` when you sign in, using the standard per-user `Run` registry entry, so it also appears in Task Manager's Startup apps. Turning it off there shows here too. If you move the exe, tick it again to point at the new location.
   - **About Zap**
   - **Exit**: asks for confirmation (unless paused), then lets the computer sleep again.
 
-Only one copy runs at a time.
+Only one copy runs at a time. Your menu choices are remembered between runs; pausing isn't, so Zap always starts active.
 
 ## How it works
 
-It calls the Win32 `SetThreadExecutionState` API with `ES_CONTINUOUS | ES_SYSTEM_REQUIRED` (plus `ES_DISPLAY_REQUIRED` when "Keep display on" is ticked), the same approach as Caffeine. Pausing clears the request. Zap waits on the Windows message queue, so it uses no CPU while idle.
+- **Staying awake:** Zap calls the Win32 `SetThreadExecutionState` API with `ES_CONTINUOUS | ES_SYSTEM_REQUIRED` (plus `ES_DISPLAY_REQUIRED` when "Keep display on" is ticked), the same approach as Caffeine. Pausing clears the request.
+- **Teams:** this doesn't count as user activity, so on its own it doesn't stop Teams going Away. "Keep Teams active" adds a 30-second timer that checks `GetLastInputInfo` and sends an F15 key press with `SendInput` once input has been idle for 4 minutes. Teams goes Away after 5. The timer only exists while the option is on and Zap isn't paused.
+- **Footprint:** Zap waits on the Windows message queue, so it uses no CPU while idle (about 2 MB of memory).
+
+### Where settings are stored
+
+| Setting | Location |
+|---|---|
+| Keep display on | `HKCU\Software\Zap\KeepDisplayOn` (DWORD) |
+| Keep Teams active | `HKCU\Software\Zap\KeepTeamsActive` (DWORD) |
+| Start with Windows | `HKCU\Software\Microsoft\Windows\CurrentVersion\Run\Zap` |
+
+To remove every trace of Zap, untick Start with Windows, quit it, delete `HKCU\Software\Zap` and delete the exe.
 
 ## Building
 
@@ -56,6 +69,8 @@ git config core.hooksPath .githooks
 ## Differences from Caffeine
 
 - A tray menu replaces the settings window, and clicking the icon pauses or resumes.
+- "Keep display on" is on by default and remembered between runs.
+- New: Keep Teams active, and Start with Windows.
 - No Lazarus/LCL runtime: one small, self-contained executable.
 
 ## Credits

@@ -16,15 +16,20 @@ use windows_sys::Win32::System::Registry::{
     RegDeleteKeyValueW, RegGetValueW, RegSetKeyValueW, HKEY_CURRENT_USER, REG_DWORD, REG_SZ,
     RRF_RT_REG_BINARY, RRF_RT_REG_DWORD, RRF_RT_REG_SZ,
 };
+use windows_sys::Win32::System::SystemInformation::GetTickCount;
 use windows_sys::Win32::System::Threading::CreateMutexW;
 use windows_sys::Win32::UI::HiDpi::{
     GetDpiForWindow, GetSystemMetricsForDpi, SetProcessDpiAwarenessContext,
     DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
 };
+use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
+    GetLastInputInfo, SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP,
+    LASTINPUTINFO, VK_F15,
+};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    DispatchMessageW, FindWindowW, GetMessageW, GetSystemMetrics, MessageBoxW, PostQuitMessage,
-    TranslateMessage, IDYES, MB_DEFBUTTON2, MB_ICONINFORMATION, MB_ICONWARNING, MB_OK,
-    MB_SETFOREGROUND, MB_YESNO, MSG, SM_CXSMICON,
+    DispatchMessageW, FindWindowW, GetMessageW, GetSystemMetrics, KillTimer, MessageBoxW,
+    PostQuitMessage, SetTimer, TranslateMessage, IDYES, MB_DEFBUTTON2, MB_ICONINFORMATION,
+    MB_ICONWARNING, MB_OK, MB_SETFOREGROUND, MB_YESNO, MSG, SM_CXSMICON, WM_TIMER,
 };
 
 const APP_NAME: &str = "Zap";
@@ -34,6 +39,11 @@ const ICON_PAUSED: u16 = 2;
 /// Settings live under HKEY_CURRENT_USER\Software\Zap.
 const SETTINGS_KEY: &str = "Software\\Zap";
 const KEEP_DISPLAY_ON_VALUE: &str = "KeepDisplayOn";
+const KEEP_TEAMS_ACTIVE_VALUE: &str = "KeepTeamsActive";
+/// Teams shows you as Away after 5 minutes without keyboard or mouse input, so
+/// nudge it once input has been idle for 4, checking every 30 seconds.
+const TEAMS_IDLE_LIMIT_MS: u32 = 4 * 60 * 1000;
+const TEAMS_CHECK_INTERVAL_MS: u32 = 30 * 1000;
 /// Per-user autostart entry, the same one Task Manager's Startup apps lists.
 const RUN_KEY: &str = "Software\\Microsoft\\Windows\\CurrentVersion\\Run";
 /// Where Task Manager records an autostart entry the user has disabled.
@@ -56,9 +66,11 @@ fn main() {
     }
 
     // On by default: on Modern Standby laptops a dark screen looks like sleep.
-    let display = load_keep_display_on().unwrap_or(true);
+    let display = load_setting(KEEP_DISPLAY_ON_VALUE).unwrap_or(true);
+    let teams = load_setting(KEEP_TEAMS_ACTIVE_VALUE).unwrap_or(false);
     let pause = MenuItem::new("Pause", true, None);
     let keep_display_on = CheckMenuItem::new("Keep display on", true, display, None);
+    let keep_teams_active = CheckMenuItem::new("Keep Teams active", true, teams, None);
     let start_with_windows =
         CheckMenuItem::new("Start with Windows", true, starts_with_windows(), None);
     let about = MenuItem::new("About Zap", true, None);
@@ -68,6 +80,7 @@ fn main() {
     menu.append_items(&[
         &pause,
         &keep_display_on,
+        &keep_teams_active,
         &start_with_windows,
         &PredefinedMenuItem::separator(),
         &about,
@@ -88,8 +101,10 @@ fn main() {
         tray,
         pause,
         keep_display_on,
+        keep_teams_active,
         paused: false,
         icon_size,
+        teams_timer: 0,
     };
     zap.apply();
 
@@ -97,6 +112,12 @@ fn main() {
     // are queued while a message is dispatched, so drain them after each one.
     let mut msg: MSG = unsafe { std::mem::zeroed() };
     while unsafe { GetMessageW(&mut msg, null_mut(), 0, 0) } > 0 {
+        // Our thread timer has no window; tray-icon's timers belong to its window.
+        if msg.message == WM_TIMER && msg.hwnd.is_null() && msg.wParam == zap.teams_timer {
+            nudge_if_idle();
+            continue;
+        }
+
         unsafe {
             TranslateMessage(&msg);
             DispatchMessageW(&msg);
@@ -119,7 +140,10 @@ fn main() {
             if event.id == *zap.pause.id() {
                 zap.toggle_pause();
             } else if event.id == *zap.keep_display_on.id() {
-                save_keep_display_on(zap.keep_display_on.is_checked());
+                save_setting(KEEP_DISPLAY_ON_VALUE, zap.keep_display_on.is_checked());
+                zap.apply();
+            } else if event.id == *zap.keep_teams_active.id() {
+                save_setting(KEEP_TEAMS_ACTIVE_VALUE, zap.keep_teams_active.is_checked());
                 zap.apply();
             } else if event.id == *start_with_windows.id() {
                 set_start_with_windows(start_with_windows.is_checked());
@@ -141,8 +165,11 @@ struct Zap {
     tray: TrayIcon,
     pause: MenuItem,
     keep_display_on: CheckMenuItem,
+    keep_teams_active: CheckMenuItem,
     paused: bool,
     icon_size: u32,
+    /// Thread timer ID for the Teams idle check, or 0 when it isn't running.
+    teams_timer: usize,
 }
 
 impl Zap {
@@ -151,12 +178,22 @@ impl Zap {
         self.apply();
     }
 
-    /// Brings the power request, icon, tooltip and menu in line with the current state.
-    fn apply(&self) {
+    /// Brings the power request, Teams timer, icon, tooltip and menu in line with
+    /// the current state.
+    fn apply(&mut self) {
         if self.paused {
             unsafe { SetThreadExecutionState(ES_CONTINUOUS) };
         } else {
             set_awake(self.keep_display_on.is_checked());
+        }
+
+        // The timer only runs while it's needed, so Zap otherwise never wakes up.
+        let want_timer = !self.paused && self.keep_teams_active.is_checked();
+        if want_timer && self.teams_timer == 0 {
+            self.teams_timer = unsafe { SetTimer(null_mut(), 0, TEAMS_CHECK_INTERVAL_MS, None) };
+        } else if !want_timer && self.teams_timer != 0 {
+            unsafe { KillTimer(null_mut(), self.teams_timer) };
+            self.teams_timer = 0;
         }
 
         let _ = self.tray.set_icon(Some(load_icon(self.icon_id(), self.icon_size)));
@@ -191,10 +228,47 @@ fn set_awake(keep_display_on: bool) {
     unsafe { SetThreadExecutionState(flags) };
 }
 
-/// Returns the saved "Keep display on" choice, or None if it has never been set.
-fn load_keep_display_on() -> Option<bool> {
+/// Presses and releases F15 if there has been no keyboard or mouse input for
+/// TEAMS_IDLE_LIMIT_MS, which resets the idle time Teams watches. Almost no
+/// keyboard has F15 and nothing uses it, so it doesn't type or trigger anything.
+fn nudge_if_idle() {
+    let mut info = LASTINPUTINFO {
+        cbSize: std::mem::size_of::<LASTINPUTINFO>() as u32,
+        dwTime: 0,
+    };
+    if unsafe { GetLastInputInfo(&mut info) } == 0 {
+        return;
+    }
+    if unsafe { GetTickCount() }.wrapping_sub(info.dwTime) < TEAMS_IDLE_LIMIT_MS {
+        return;
+    }
+
+    let key = |flags| INPUT {
+        r#type: INPUT_KEYBOARD,
+        Anonymous: INPUT_0 {
+            ki: KEYBDINPUT {
+                wVk: VK_F15,
+                wScan: 0,
+                dwFlags: flags,
+                time: 0,
+                dwExtraInfo: 0,
+            },
+        },
+    };
+    let inputs = [key(0), key(KEYEVENTF_KEYUP)];
+    unsafe {
+        SendInput(
+            inputs.len() as u32,
+            inputs.as_ptr(),
+            std::mem::size_of::<INPUT>() as i32,
+        )
+    };
+}
+
+/// Returns a saved on/off setting, or None if it has never been set.
+fn load_setting(name: &str) -> Option<bool> {
     let key = wide(SETTINGS_KEY);
-    let value = wide(KEEP_DISPLAY_ON_VALUE);
+    let value = wide(name);
     let mut data: u32 = 0;
     let mut size = std::mem::size_of::<u32>() as u32;
     let status = unsafe {
@@ -211,11 +285,11 @@ fn load_keep_display_on() -> Option<bool> {
     (status == ERROR_SUCCESS).then_some(data != 0)
 }
 
-/// Saves the "Keep display on" choice, creating the key if needed. Failure is
-/// ignored: the setting just won't be remembered next time.
-fn save_keep_display_on(on: bool) {
+/// Saves an on/off setting, creating the key if needed. Failure is ignored:
+/// the setting just won't be remembered next time.
+fn save_setting(name: &str, on: bool) {
     let key = wide(SETTINGS_KEY);
-    let value = wide(KEEP_DISPLAY_ON_VALUE);
+    let value = wide(name);
     let data = u32::from(on);
     unsafe {
         RegSetKeyValueW(
