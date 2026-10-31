@@ -6,7 +6,11 @@ Zap is a Rust rewrite of [Caffeine](https://github.com/kyleleong/caffeine) by Ky
 
 ## Download
 
-The latest build is always [`dist/zap.exe`](dist/zap.exe) in this repo. It's a single file with nothing to install; copy it somewhere permanent (for example `%LOCALAPPDATA%\Programs\Zap`) and run it from there.
+The latest build is always [`dist/zap.exe`](dist/zap.exe) in this repo. It's a single file with nothing to install; copy it somewhere permanent (for example `%LOCALAPPDATA%\Programs\Zap\zap.exe`) and run it from there. The first run turns on Start with Windows for that copy.
+
+To update, quit Zap (right-click → Exit), copy the new `dist/zap.exe` over the old one and start it again. Your settings and autostart carry over because the path hasn't changed.
+
+Don't run Zap day to day from `dist/` or the build folder: a running exe is locked, so the next build or commit can't replace it.
 
 ## Usage
 
