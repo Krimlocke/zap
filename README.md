@@ -20,7 +20,7 @@ Zap lives in the system tray as a white lightning bolt.
 - **Right-click** for the menu:
   - **Pause / Resume**
   - **Keep display on** (on by default): also stop the screen from turning off. On Modern Standby laptops a screen that turns off looks like sleep, which is why this starts on.
-  - **Keep Teams active** (on by default): stops Microsoft Teams (and similar apps) showing you as Away. After 4 minutes with no keyboard or mouse input, Zap presses F15, a key almost no keyboard has and nothing uses, so it doesn't type or trigger anything. It never fires while you're using the PC, and can't while the screen is locked, so it works best with "Keep display on". Check your workplace's policy on activity tools before relying on it.
+  - **Keep Teams active** (on by default): stops Microsoft Teams (and similar apps) showing you as Away. Once you haven't touched the keyboard or mouse for 99 seconds, Zap presses F15, and again every 99 seconds until you're back. F15 is a key almost no keyboard has and nothing uses, so it doesn't type or trigger anything. It never fires while you're using the PC, and can't while the screen is locked, so it works best with "Keep display on". Check your workplace's policy on activity tools before relying on it.
   - **Start with Windows** (on by default): runs `zap.exe` when you sign in, using the standard per-user `Run` registry entry, so it also appears in Task Manager's Startup apps. The very first time Zap runs, it turns this on for that copy of the exe, so run it first from where you want to keep it. After that your choice sticks, including turning it off in Task Manager. If you move the exe, tick it again to point at the new location.
   - **About Zap**
   - **Exit**: asks for confirmation (unless paused), then lets the computer sleep again.
@@ -30,7 +30,7 @@ Only one copy runs at a time. Your menu choices are remembered between runs; pau
 ## How it works
 
 - **Staying awake:** Zap calls the Win32 `SetThreadExecutionState` API with `ES_CONTINUOUS | ES_SYSTEM_REQUIRED` (plus `ES_DISPLAY_REQUIRED` when "Keep display on" is ticked). Pausing clears the request.
-- **Teams:** this doesn't count as user activity, so on its own it doesn't stop Teams going Away. "Keep Teams active" adds a 30-second timer that checks `GetLastInputInfo` and sends an F15 key press with `SendInput` once input has been idle for 4 minutes. Teams goes Away after 5. The timer only exists while the option is on and Zap isn't paused.
+- **Teams:** this doesn't count as user activity, so on its own it doesn't stop Teams going Away. "Keep Teams active" uses a timer that reads `GetLastInputInfo` and sends an F15 key press with `SendInput` once input has been idle for 99 seconds. Each tick re-arms the timer for exactly the time left, so the press lands when the idle time reaches 99 seconds and repeats every 99 seconds while you're away (Teams itself goes Away after 5 minutes). The timer only exists while the option is on and Zap isn't paused.
 - **Footprint:** Zap waits on the Windows message queue, so it uses no CPU while idle. Five seconds after starting, and after each click or menu action, it lets Windows move its idle memory out of RAM (`SetProcessWorkingSetSize`), so Task Manager shows it at roughly 60–100 KB, briefly a few hundred KB while you use it. Those pages come back instantly when needed, so nothing slows down.
 
 ### Where settings are stored

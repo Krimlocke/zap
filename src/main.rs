@@ -42,10 +42,10 @@ const KEEP_DISPLAY_ON_VALUE: &str = "KeepDisplayOn";
 const KEEP_TEAMS_ACTIVE_VALUE: &str = "KeepTeamsActive";
 /// The user's last Start with Windows choice. Its absence marks a first run.
 const START_WITH_WINDOWS_VALUE: &str = "StartWithWindows";
-/// Teams shows you as Away after 5 minutes without keyboard or mouse input, so
-/// nudge it once input has been idle for 4, checking every 30 seconds.
-const TEAMS_IDLE_LIMIT_MS: u32 = 4 * 60 * 1000;
-const TEAMS_CHECK_INTERVAL_MS: u32 = 30 * 1000;
+/// Teams shows you as Away after a few minutes without keyboard or mouse input.
+/// Zap presses F15 once input has been idle this long, and again every time
+/// another interval passes without input.
+const TEAMS_NUDGE_INTERVAL_MS: u32 = 99 * 1000;
 /// How long Zap waits after startup or the last click before trimming its memory.
 const TRIM_DELAY_MS: u32 = 5 * 1000;
 /// Per-user autostart entry, the same one Task Manager's Startup apps lists.
@@ -127,8 +127,10 @@ fn main() {
     while unsafe { GetMessageW(&mut msg, null_mut(), 0, 0) } > 0 {
         // Our thread timers have no window; tray-icon's timers belong to its window.
         if msg.message == WM_TIMER && msg.hwnd.is_null() {
-            if msg.wParam == zap.teams_timer && nudge_if_idle() {
-                zap.schedule_trim();
+            if msg.wParam == zap.teams_timer {
+                if zap.teams_tick() {
+                    zap.schedule_trim();
+                }
             } else if msg.wParam == zap.trim_timer {
                 zap.trim_memory();
             }
@@ -217,6 +219,23 @@ impl Zap {
         self.trim_timer = 0;
     }
 
+    /// Runs on each Teams timer tick: nudges if input has been idle for the
+    /// whole interval, then re-arms the timer so the next tick lands exactly
+    /// when the idle time next reaches it. Returns true if it nudged.
+    fn teams_tick(&mut self) -> bool {
+        let idle = idle_ms();
+        let due = idle >= TEAMS_NUDGE_INTERVAL_MS;
+        let nudged = due && nudge();
+        let delay = if due {
+            TEAMS_NUDGE_INTERVAL_MS
+        } else {
+            TEAMS_NUDGE_INTERVAL_MS - idle
+        };
+        // Passing the existing ID resets that timer instead of creating another.
+        self.teams_timer = unsafe { SetTimer(null_mut(), self.teams_timer, delay, None) };
+        nudged
+    }
+
     fn toggle_pause(&mut self) {
         self.paused = !self.paused;
         self.apply();
@@ -234,7 +253,7 @@ impl Zap {
         // The timer only runs while it's needed, so Zap otherwise never wakes up.
         let want_timer = !self.paused && self.keep_teams_active.is_checked();
         if want_timer && self.teams_timer == 0 {
-            self.teams_timer = unsafe { SetTimer(null_mut(), 0, TEAMS_CHECK_INTERVAL_MS, None) };
+            self.teams_tick();
         } else if !want_timer && self.teams_timer != 0 {
             unsafe { KillTimer(null_mut(), self.teams_timer) };
             self.teams_timer = 0;
@@ -272,22 +291,23 @@ fn set_awake(keep_display_on: bool) {
     unsafe { SetThreadExecutionState(flags) };
 }
 
-/// Presses and releases F15 if there has been no keyboard or mouse input for
-/// TEAMS_IDLE_LIMIT_MS, which resets the idle time Teams watches. Almost no
-/// keyboard has F15 and nothing uses it, so it doesn't type or trigger anything.
-/// Returns true if it sent the key press.
-fn nudge_if_idle() -> bool {
+/// Milliseconds since the last keyboard or mouse input. If Windows can't say,
+/// reports a full interval so a nudge is sent rather than skipped.
+fn idle_ms() -> u32 {
     let mut info = LASTINPUTINFO {
         cbSize: std::mem::size_of::<LASTINPUTINFO>() as u32,
         dwTime: 0,
     };
     if unsafe { GetLastInputInfo(&mut info) } == 0 {
-        return false;
+        return TEAMS_NUDGE_INTERVAL_MS;
     }
-    if unsafe { GetTickCount() }.wrapping_sub(info.dwTime) < TEAMS_IDLE_LIMIT_MS {
-        return false;
-    }
+    unsafe { GetTickCount() }.wrapping_sub(info.dwTime)
+}
 
+/// Presses and releases F15, which resets the idle time Teams watches. Almost no
+/// keyboard has F15 and nothing uses it, so it doesn't type or trigger anything.
+/// Returns true if the press was sent.
+fn nudge() -> bool {
     let key = |flags| INPUT {
         r#type: INPUT_KEYBOARD,
         Anonymous: INPUT_0 {
