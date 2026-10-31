@@ -8,9 +8,12 @@ use std::ptr::null_mut;
 
 use tray_icon::menu::{CheckMenuItem, Menu, MenuEvent, MenuItem, PredefinedMenuItem};
 use tray_icon::{Icon, TrayIconBuilder};
-use windows_sys::Win32::Foundation::{GetLastError, ERROR_ALREADY_EXISTS};
+use windows_sys::Win32::Foundation::{GetLastError, ERROR_ALREADY_EXISTS, ERROR_SUCCESS};
 use windows_sys::Win32::System::Power::{
     SetThreadExecutionState, ES_CONTINUOUS, ES_DISPLAY_REQUIRED, ES_SYSTEM_REQUIRED,
+};
+use windows_sys::Win32::System::Registry::{
+    RegGetValueW, RegSetKeyValueW, HKEY_CURRENT_USER, REG_DWORD, RRF_RT_REG_DWORD,
 };
 use windows_sys::Win32::System::Threading::CreateMutexW;
 use windows_sys::Win32::UI::HiDpi::{
@@ -25,6 +28,9 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 const APP_NAME: &str = "Zap";
 /// Resource ID of assets/zap.ico, embedded by build.rs via zap.rc.
 const ICON_RESOURCE_ID: u16 = 1;
+/// Settings live under HKEY_CURRENT_USER\Software\Zap.
+const SETTINGS_KEY: &str = "Software\\Zap";
+const KEEP_DISPLAY_ON_VALUE: &str = "KeepDisplayOn";
 
 fn main() {
     // Without this Windows reports 16px icon sizes on high-DPI screens and then
@@ -40,7 +46,9 @@ fn main() {
         return;
     }
 
-    let keep_display_on = CheckMenuItem::new("Keep display on", true, false, None);
+    // On by default: on Modern Standby laptops a dark screen looks like sleep.
+    let display = load_keep_display_on().unwrap_or(true);
+    let keep_display_on = CheckMenuItem::new("Keep display on", true, display, None);
     let about = MenuItem::new("About Zap", true, None);
     let exit = MenuItem::new("Exit", true, None);
 
@@ -56,12 +64,12 @@ fn main() {
     let tray = TrayIconBuilder::new()
         .with_menu(Box::new(menu))
         .with_menu_on_left_click(true)
-        .with_tooltip(tooltip(false))
+        .with_tooltip(tooltip(display))
         .with_icon(load_icon())
         .build()
         .expect("failed to create tray icon");
 
-    set_awake(false);
+    set_awake(display);
 
     // tray-icon needs a Win32 message loop on this thread. Menu events are queued
     // while a message is dispatched, so drain them after each one.
@@ -76,6 +84,7 @@ fn main() {
             if event.id == *keep_display_on.id() {
                 let display = keep_display_on.is_checked();
                 set_awake(display);
+                save_keep_display_on(display);
                 let _ = tray.set_tooltip(Some(tooltip(display)));
             } else if event.id == *about.id() {
                 show_about();
@@ -96,6 +105,44 @@ fn set_awake(keep_display_on: bool) {
         flags |= ES_DISPLAY_REQUIRED;
     }
     unsafe { SetThreadExecutionState(flags) };
+}
+
+/// Returns the saved "Keep display on" choice, or None if it has never been set.
+fn load_keep_display_on() -> Option<bool> {
+    let key = wide(SETTINGS_KEY);
+    let value = wide(KEEP_DISPLAY_ON_VALUE);
+    let mut data: u32 = 0;
+    let mut size = std::mem::size_of::<u32>() as u32;
+    let status = unsafe {
+        RegGetValueW(
+            HKEY_CURRENT_USER,
+            key.as_ptr(),
+            value.as_ptr(),
+            RRF_RT_REG_DWORD,
+            null_mut(),
+            (&mut data as *mut u32).cast(),
+            &mut size,
+        )
+    };
+    (status == ERROR_SUCCESS).then_some(data != 0)
+}
+
+/// Saves the "Keep display on" choice, creating the key if needed. Failure is
+/// ignored: the setting just won't be remembered next time.
+fn save_keep_display_on(on: bool) {
+    let key = wide(SETTINGS_KEY);
+    let value = wide(KEEP_DISPLAY_ON_VALUE);
+    let data = u32::from(on);
+    unsafe {
+        RegSetKeyValueW(
+            HKEY_CURRENT_USER,
+            key.as_ptr(),
+            value.as_ptr(),
+            REG_DWORD,
+            (&data as *const u32).cast(),
+            std::mem::size_of::<u32>() as u32,
+        )
+    };
 }
 
 fn tooltip(keep_display_on: bool) -> String {

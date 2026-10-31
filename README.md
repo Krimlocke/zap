@@ -8,7 +8,7 @@ Zap is a Rust rewrite of [Caffeine](https://github.com/kyleleong/caffeine) by Ky
 
 Run `zap.exe`. It lives in the system tray; click the icon for the menu:
 
-- **Keep display on**: also stop the screen from turning off.
+- **Keep display on** (on by default): also stop the screen from turning off. Your choice is remembered in `HKEY_CURRENT_USER\Software\Zap`. On Modern Standby laptops a screen that turns off looks like sleep, which is why this starts on.
 - **About Zap**
 - **Exit**: asks for confirmation, then lets the computer sleep again.
 
