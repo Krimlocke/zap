@@ -13,7 +13,8 @@ use windows_sys::Win32::System::Power::{
     SetThreadExecutionState, ES_CONTINUOUS, ES_DISPLAY_REQUIRED, ES_SYSTEM_REQUIRED,
 };
 use windows_sys::Win32::System::Registry::{
-    RegGetValueW, RegSetKeyValueW, HKEY_CURRENT_USER, REG_DWORD, RRF_RT_REG_DWORD,
+    RegDeleteKeyValueW, RegGetValueW, RegSetKeyValueW, HKEY_CURRENT_USER, REG_DWORD, REG_SZ,
+    RRF_RT_REG_BINARY, RRF_RT_REG_DWORD, RRF_RT_REG_SZ,
 };
 use windows_sys::Win32::System::Threading::CreateMutexW;
 use windows_sys::Win32::UI::HiDpi::{
@@ -33,6 +34,12 @@ const ICON_PAUSED: u16 = 2;
 /// Settings live under HKEY_CURRENT_USER\Software\Zap.
 const SETTINGS_KEY: &str = "Software\\Zap";
 const KEEP_DISPLAY_ON_VALUE: &str = "KeepDisplayOn";
+/// Per-user autostart entry, the same one Task Manager's Startup apps lists.
+const RUN_KEY: &str = "Software\\Microsoft\\Windows\\CurrentVersion\\Run";
+/// Where Task Manager records an autostart entry the user has disabled.
+const STARTUP_APPROVED_KEY: &str =
+    "Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\StartupApproved\\Run";
+const RUN_VALUE: &str = "Zap";
 
 fn main() {
     // Without this Windows reports 16px icon sizes on high-DPI screens and then
@@ -52,6 +59,8 @@ fn main() {
     let display = load_keep_display_on().unwrap_or(true);
     let pause = MenuItem::new("Pause", true, None);
     let keep_display_on = CheckMenuItem::new("Keep display on", true, display, None);
+    let start_with_windows =
+        CheckMenuItem::new("Start with Windows", true, starts_with_windows(), None);
     let about = MenuItem::new("About Zap", true, None);
     let exit = MenuItem::new("Exit", true, None);
 
@@ -59,6 +68,7 @@ fn main() {
     menu.append_items(&[
         &pause,
         &keep_display_on,
+        &start_with_windows,
         &PredefinedMenuItem::separator(),
         &about,
         &exit,
@@ -70,7 +80,6 @@ fn main() {
     let tray = TrayIconBuilder::new()
         .with_menu(Box::new(menu))
         .with_menu_on_left_click(false)
-        .with_tooltip(APP_NAME)
         .with_icon(load_icon(ICON_ACTIVE, icon_size))
         .build()
         .expect("failed to create tray icon");
@@ -112,6 +121,10 @@ fn main() {
             } else if event.id == *zap.keep_display_on.id() {
                 save_keep_display_on(zap.keep_display_on.is_checked());
                 zap.apply();
+            } else if event.id == *start_with_windows.id() {
+                set_start_with_windows(start_with_windows.is_checked());
+                // Show what actually took effect, in case the registry write failed.
+                start_with_windows.set_checked(starts_with_windows());
             } else if event.id == *about.id() {
                 show_about();
             } else if event.id == *exit.id() && (zap.paused || confirm_exit()) {
@@ -138,7 +151,7 @@ impl Zap {
         self.apply();
     }
 
-    /// Brings the power request, icon and menu in line with the current state.
+    /// Brings the power request, icon, tooltip and menu in line with the current state.
     fn apply(&self) {
         if self.paused {
             unsafe { SetThreadExecutionState(ES_CONTINUOUS) };
@@ -147,6 +160,8 @@ impl Zap {
         }
 
         let _ = self.tray.set_icon(Some(load_icon(self.icon_id(), self.icon_size)));
+        let state = if self.paused { "inactive" } else { "active" };
+        let _ = self.tray.set_tooltip(Some(format!("{APP_NAME}: {state}")));
         self.pause.set_text(if self.paused { "Resume" } else { "Pause" });
     }
 
@@ -212,6 +227,97 @@ fn save_keep_display_on(on: bool) {
             std::mem::size_of::<u32>() as u32,
         )
     };
+}
+
+/// The command Windows runs at sign-in: this exe's full path, quoted.
+fn run_command() -> Option<String> {
+    let exe = std::env::current_exe().ok()?;
+    Some(format!("\"{}\"", exe.display()))
+}
+
+/// True if Zap is set to start at sign-in, from this exe, and the entry hasn't
+/// been disabled in Task Manager. An entry pointing at another copy of Zap
+/// (e.g. after moving the exe) counts as off, so ticking the menu item repoints it.
+fn starts_with_windows() -> bool {
+    let (Some(command), Some(registered)) = (run_command(), read_reg_string(RUN_KEY, RUN_VALUE))
+    else {
+        return false;
+    };
+    if !registered.eq_ignore_ascii_case(&command) {
+        return false;
+    }
+
+    // Task Manager stores a 12-byte value whose first byte is odd when disabled.
+    let key = wide(STARTUP_APPROVED_KEY);
+    let value = wide(RUN_VALUE);
+    let mut data = [0u8; 12];
+    let mut size = data.len() as u32;
+    let status = unsafe {
+        RegGetValueW(
+            HKEY_CURRENT_USER,
+            key.as_ptr(),
+            value.as_ptr(),
+            RRF_RT_REG_BINARY,
+            null_mut(),
+            data.as_mut_ptr().cast(),
+            &mut size,
+        )
+    };
+    !(status == ERROR_SUCCESS && data[0] & 1 == 1)
+}
+
+/// Adds or removes the sign-in entry. Turning it on also clears any "disabled"
+/// mark Task Manager left, so the menu and Task Manager agree.
+fn set_start_with_windows(on: bool) {
+    let run_key = wide(RUN_KEY);
+    let approved_key = wide(STARTUP_APPROVED_KEY);
+    let value = wide(RUN_VALUE);
+    unsafe {
+        RegDeleteKeyValueW(HKEY_CURRENT_USER, approved_key.as_ptr(), value.as_ptr());
+        if !on {
+            RegDeleteKeyValueW(HKEY_CURRENT_USER, run_key.as_ptr(), value.as_ptr());
+            return;
+        }
+    }
+    let Some(command) = run_command() else { return };
+    let data = wide(&command);
+    unsafe {
+        RegSetKeyValueW(
+            HKEY_CURRENT_USER,
+            run_key.as_ptr(),
+            value.as_ptr(),
+            REG_SZ,
+            data.as_ptr().cast(),
+            (data.len() * 2) as u32,
+        )
+    };
+}
+
+/// Reads a REG_SZ value from HKEY_CURRENT_USER.
+fn read_reg_string(key: &str, value: &str) -> Option<String> {
+    let key = wide(key);
+    let value = wide(value);
+    let mut size = 0u32;
+    let read = |buffer: *mut u16, size: &mut u32| unsafe {
+        RegGetValueW(
+            HKEY_CURRENT_USER,
+            key.as_ptr(),
+            value.as_ptr(),
+            RRF_RT_REG_SZ,
+            null_mut(),
+            buffer.cast(),
+            size,
+        )
+    };
+    if read(null_mut(), &mut size) != ERROR_SUCCESS {
+        return None;
+    }
+    let mut buffer = vec![0u16; (size as usize).div_ceil(2)];
+    if read(buffer.as_mut_ptr(), &mut size) != ERROR_SUCCESS {
+        return None;
+    }
+    let len = buffer.iter().position(|&c| c == 0).unwrap_or(buffer.len());
+    Some(String::from_utf16_lossy(&buffer[..len]))
 }
 
 /// The small-icon size for the taskbar's monitor, which can differ from the

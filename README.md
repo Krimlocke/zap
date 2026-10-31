@@ -12,10 +12,11 @@ The latest build is always [`dist/zap.exe`](dist/zap.exe) in this repo. It's a s
 
 Zap lives in the system tray as a white lightning bolt.
 
-- **Click** the icon to pause or resume. While paused the bolt is dimmed and your PC sleeps normally.
+- **Click** the icon to pause or resume. While paused the bolt is dimmed, the tooltip reads "Zap: inactive" (otherwise "Zap: active"), and your PC sleeps normally.
 - **Right-click** for the menu:
   - **Pause / Resume**
   - **Keep display on** (on by default): also stop the screen from turning off. Your choice is remembered in `HKEY_CURRENT_USER\Software\Zap`. On Modern Standby laptops a screen that turns off looks like sleep, which is why this starts on.
+  - **Start with Windows**: runs this copy of `zap.exe` when you sign in, using the standard per-user `Run` registry entry, so it also appears in Task Manager's Startup apps. Turning it off there shows here too. If you move the exe, tick it again to point at the new location.
   - **About Zap**
   - **Exit**: asks for confirmation (unless paused), then lets the computer sleep again.
 
