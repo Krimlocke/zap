@@ -1,12 +1,31 @@
 #!/bin/sh
-# Rebuilds the release exe and adds it to the commit as dist/zap.exe whenever
-# the commit touches anything that ends up in the binary. A failed build stops
-# the commit, so the committed exe always matches the committed code.
+# Whenever the commit touches anything that ends up in the binary:
+#   1. bumps the patch version in Cargo.toml (0.1.4 -> 0.1.5), unless the
+#      commit already changes the version, e.g. a manual minor/major bump;
+#   2. rebuilds the release exe and adds it to the commit as dist/zap.exe.
+# A failed build stops the commit, so the committed exe always matches the
+# committed code.
 #
 # Enable once per clone:  git config core.hooksPath .githooks
 
 if ! git diff --cached --name-only | grep -qE '^(src/|assets/|build\.rs$|Cargo\.(toml|lock)$)'; then
     exit 0
+fi
+
+if ! git diff --cached -U0 -- Cargo.toml | grep -qE '^\+version = '; then
+    if ! git diff --quiet -- Cargo.toml; then
+        echo "pre-commit: Cargo.toml has unstaged changes; stage or stash them so the version bump doesn't pick them up." >&2
+        exit 1
+    fi
+    old=$(sed -n 's/^version = "\([0-9]*\.[0-9]*\.[0-9]*\)"$/\1/p' Cargo.toml | head -n 1)
+    if [ -z "$old" ]; then
+        echo "pre-commit: couldn't read the version from Cargo.toml." >&2
+        exit 1
+    fi
+    new=$(echo "$old" | awk -F. '{ printf "%d.%d.%d", $1, $2, $3 + 1 }')
+    sed -i "0,/^version = \"$old\"\$/s//version = \"$new\"/" Cargo.toml
+    git add Cargo.toml
+    echo "pre-commit: version $old -> $new"
 fi
 
 # Git GUIs don't always inherit the shell PATH, so add the usual tool locations.
@@ -29,5 +48,6 @@ if ! cp "$target_dir/release/zap.exe" dist/zap.exe; then
     echo "pre-commit: couldn't overwrite dist/zap.exe. Quit Zap if it's running from dist/ and try again." >&2
     exit 1
 fi
-git add dist/zap.exe
+# The build records the new version in Cargo.lock.
+git add dist/zap.exe Cargo.lock
 echo "pre-commit: dist/zap.exe updated."
