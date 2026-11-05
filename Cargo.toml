@@ -1,6 +1,6 @@
 [package]
 name = "zap"
-version = "0.1.9"
+version = "0.1.10"
 edition = "2021"
 description = "Prevent your computer from going to sleep"
 license = "MIT"
@@ -10,6 +10,7 @@ rust-version = "1.90"
 tray-icon = { version = "0.26", default-features = false }
 windows-sys = { version = "0.61", features = [
   "Win32_Foundation",
+  "Win32_Graphics_Gdi",
   "Win32_Security",
   "Win32_System_Power",
   "Win32_System_Registry",

@@ -2,14 +2,20 @@
 
 #![windows_subsystem = "windows"]
 
+use std::cell::RefCell;
 use std::collections::hash_map::RandomState;
 use std::hash::BuildHasher;
 use std::ptr::null_mut;
 use std::time::{Duration, Instant};
 
-use tray_icon::menu::{CheckMenuItem, Menu, MenuEvent, MenuItem, PredefinedMenuItem};
+use tray_icon::menu::{
+    CheckMenuItem, ContextMenu, Menu, MenuEvent, MenuItem, MenuItemKind, PredefinedMenuItem,
+};
 use tray_icon::{Icon, MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent};
-use windows_sys::Win32::Foundation::{GetLastError, ERROR_ALREADY_EXISTS, ERROR_SUCCESS};
+use windows_sys::Win32::Foundation::{
+    GetLastError, ERROR_ALREADY_EXISTS, ERROR_SUCCESS, LPARAM, LRESULT, POINT, WPARAM,
+};
+use windows_sys::Win32::Graphics::Gdi::InvalidateRect;
 use windows_sys::Win32::System::Power::{
     SetThreadExecutionState, ES_CONTINUOUS, ES_DISPLAY_REQUIRED, ES_SYSTEM_REQUIRED,
 };
@@ -19,7 +25,7 @@ use windows_sys::Win32::System::Registry::{
 };
 use windows_sys::Win32::System::SystemInformation::GetTickCount;
 use windows_sys::Win32::System::Threading::{
-    CreateMutexW, GetCurrentProcess, SetProcessWorkingSetSize,
+    CreateMutexW, GetCurrentProcess, GetCurrentThreadId, SetProcessWorkingSetSize,
 };
 use windows_sys::Win32::UI::HiDpi::{
     GetDpiForWindow, GetSystemMetricsForDpi, SetProcessDpiAwarenessContext,
@@ -30,9 +36,12 @@ use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     LASTINPUTINFO, VK_F15,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    DispatchMessageW, FindWindowW, GetMessageW, GetSystemMetrics, KillTimer, MessageBoxW,
-    PostQuitMessage, SetTimer, TranslateMessage, IDYES, MB_DEFBUTTON2, MB_ICONINFORMATION,
-    MB_ICONWARNING, MB_OK, MB_SETFOREGROUND, MB_YESNO, MSG, SM_CXSMICON, WM_TIMER,
+    CallNextHookEx, DispatchMessageW, FindWindowW, GetMenuItemID, GetMenuState, GetMessageW,
+    GetSystemMetrics, KillTimer, MenuItemFromPoint, MessageBoxW, PostQuitMessage, SendMessageW,
+    SetTimer, SetWindowsHookExW, TranslateMessage, HMENU, IDYES, MB_DEFBUTTON2,
+    MB_ICONINFORMATION, MB_ICONWARNING, MB_OK, MB_SETFOREGROUND, MB_YESNO, MF_BYPOSITION,
+    MF_DISABLED, MF_GRAYED, MSG, MSGF_MENU, SM_CXSMICON, WH_MSGFILTER, WM_COMMAND,
+    WM_LBUTTONUP, WM_TIMER,
 };
 
 const APP_NAME: &str = "Zap";
@@ -113,6 +122,15 @@ fn main() {
     ])
     .expect("failed to build tray menu");
 
+    // Which menu positions hold tick boxes, read before the menu moves into the
+    // tray icon. The native menu has one entry per item, separators included.
+    let menu_handle = menu.hpopupmenu();
+    let tick_positions = menu
+        .items()
+        .iter()
+        .map(|item| matches!(item, MenuItemKind::Check(_)))
+        .collect();
+
     // Left click toggles pause; right click opens the menu.
     let icon_size = tray_icon_size();
     let tray = TrayIconBuilder::new()
@@ -122,20 +140,32 @@ fn main() {
         .build()
         .expect("failed to create tray icon");
 
-    let mut zap = Zap {
+    let zap = Zap {
         tray,
         pause,
         keep_display_on,
         keep_teams_active,
         rik_mode,
+        start_with_windows,
+        about,
+        exit,
+        menu_handle,
+        tick_positions,
         paused: false,
         icon_size,
         teams_timer: 0,
         rik: None,
         trim_timer: 0,
     };
-    zap.apply();
-    zap.schedule_trim();
+    ZAP.with_borrow_mut(|cell| {
+        let zap = cell.insert(zap);
+        zap.apply();
+        zap.schedule_trim();
+    });
+
+    // Sees the open tray menu's clicks so tick boxes can toggle without closing it.
+    // Only this thread's menus and dialogs pass through it.
+    unsafe { SetWindowsHookExW(WH_MSGFILTER, Some(menu_filter), null_mut(), GetCurrentThreadId()) };
 
     // tray-icon needs a Win32 message loop on this thread. Tray and menu events
     // are queued while a message is dispatched, so drain them after each one.
@@ -145,76 +175,51 @@ fn main() {
         // Dispatching a windowless timer message is a no-op, and falling through
         // still drains any tray click queued while a dialog was open.
         if msg.message == WM_TIMER && msg.hwnd.is_null() {
-            if msg.wParam == zap.teams_timer {
-                if zap.teams_tick() {
-                    zap.schedule_trim();
-                }
-            } else if msg.wParam == zap.trim_timer {
-                zap.trim_memory();
-            }
+            with_zap(|zap| zap.on_timer(msg.wParam));
         }
 
+        // Zap isn't borrowed here, so the menu hook can reach it while the
+        // menu is open inside this dispatch.
         unsafe {
             TranslateMessage(&msg);
             DispatchMessageW(&msg);
         }
 
-        let mut had_events = false;
-        while let Ok(event) = TrayIconEvent::receiver().try_recv() {
-            had_events = true;
-            match event {
-                // On press, not release: a double-click sends two releases but
-                // only one press, so it would otherwise pause and resume.
-                TrayIconEvent::Click {
-                    button: MouseButton::Left,
-                    button_state: MouseButtonState::Down,
-                    ..
-                } => zap.toggle_pause(),
-                // The menu opens on release, so refresh the tick first in case
-                // the entry was changed in Task Manager while Zap was running.
-                TrayIconEvent::Click {
-                    button: MouseButton::Right,
-                    button_state: MouseButtonState::Down,
-                    ..
-                } => start_with_windows.set_checked(starts_with_windows()),
-                // Display scaling may have changed since the icon was loaded.
-                TrayIconEvent::Enter { .. } => zap.refresh_icon_size(),
-                _ => {}
-            }
-        }
-
-        while let Ok(event) = MenuEvent::receiver().try_recv() {
-            had_events = true;
-            if event.id == *zap.pause.id() {
-                zap.toggle_pause();
-            } else if event.id == *zap.keep_display_on.id() {
-                save_setting(KEEP_DISPLAY_ON_VALUE, zap.keep_display_on.is_checked());
-                zap.apply();
-            } else if event.id == *zap.keep_teams_active.id() {
-                save_setting(KEEP_TEAMS_ACTIVE_VALUE, zap.keep_teams_active.is_checked());
-                zap.apply();
-            } else if event.id == *zap.rik_mode.id() {
-                save_setting(RIK_MODE_VALUE, zap.rik_mode.is_checked());
-                zap.apply();
-            } else if event.id == *start_with_windows.id() {
-                set_start_with_windows(start_with_windows.is_checked());
-                // Show what actually took effect, in case the registry write failed.
-                start_with_windows.set_checked(starts_with_windows());
-                save_setting(START_WITH_WINDOWS_VALUE, start_with_windows.is_checked());
-            } else if event.id == *about.id() {
-                show_about();
-            } else if event.id == *exit.id() && (zap.paused || confirm_exit()) {
-                unsafe { PostQuitMessage(0) };
-            }
-        }
-
-        if had_events {
-            zap.schedule_trim();
-        }
+        with_zap(Zap::handle_events);
     }
 
     // Hand sleep control back to Windows. This also happens when the process exits.
     unsafe { SetThreadExecutionState(ES_CONTINUOUS) };
+}
+
+thread_local! {
+    /// The app's state, kept here so the menu hook can reach it.
+    static ZAP: RefCell<Option<Zap>> = const { RefCell::new(None) };
+}
+
+/// Runs f on the app's state, or does nothing if it's already in use, as it is
+/// while a message box Zap opened is showing.
+fn with_zap<R>(f: impl FnOnce(&mut Zap) -> R) -> Option<R> {
+    ZAP.with(|cell| cell.try_borrow_mut().ok()?.as_mut().map(f))
+}
+
+/// Message hook for the open tray menu. A click on a tick box toggles it and is
+/// then swallowed, so the menu stays open for the next change. Other items
+/// close the menu as usual.
+unsafe extern "system" fn menu_filter(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+    if code == MSGF_MENU as i32 {
+        let msg = unsafe { &*(lparam as *const MSG) };
+        if msg.message == WM_LBUTTONUP && with_zap(|zap| zap.toggle_in_menu(msg.pt)) == Some(true) {
+            // Repaint the menu so ticks and greyed items show the new state.
+            let class = wide("#32768");
+            unsafe {
+                let menu_window = FindWindowW(class.as_ptr(), std::ptr::null());
+                InvalidateRect(menu_window, std::ptr::null(), 0);
+            }
+            return 1;
+        }
+    }
+    unsafe { CallNextHookEx(null_mut(), code, wparam, lparam) }
 }
 
 /// Rik Mode lets Teams go Away now and then, so you look like you stepped away.
@@ -232,6 +237,12 @@ struct Zap {
     keep_display_on: CheckMenuItem,
     keep_teams_active: CheckMenuItem,
     rik_mode: CheckMenuItem,
+    start_with_windows: CheckMenuItem,
+    about: MenuItem,
+    exit: MenuItem,
+    /// The tray menu's native handle, and which of its positions are tick boxes.
+    menu_handle: isize,
+    tick_positions: Vec<bool>,
     paused: bool,
     icon_size: u32,
     /// Thread timer ID for the Teams idle check, or 0 when it isn't running.
@@ -243,6 +254,96 @@ struct Zap {
 }
 
 impl Zap {
+    fn on_timer(&mut self, id: usize) {
+        if id == self.teams_timer {
+            if self.teams_tick() {
+                self.schedule_trim();
+            }
+        } else if id == self.trim_timer {
+            self.trim_memory();
+        }
+    }
+
+    /// Handles queued tray clicks and menu choices.
+    fn handle_events(&mut self) {
+        let mut had_events = false;
+        while let Ok(event) = TrayIconEvent::receiver().try_recv() {
+            had_events = true;
+            match event {
+                // On press, not release: a double-click sends two releases but
+                // only one press, so it would otherwise pause and resume.
+                TrayIconEvent::Click {
+                    button: MouseButton::Left,
+                    button_state: MouseButtonState::Down,
+                    ..
+                } => self.toggle_pause(),
+                // The menu opens on release, so refresh the tick first in case
+                // the entry was changed in Task Manager while Zap was running.
+                TrayIconEvent::Click {
+                    button: MouseButton::Right,
+                    button_state: MouseButtonState::Down,
+                    ..
+                } => self.start_with_windows.set_checked(starts_with_windows()),
+                // Display scaling may have changed since the icon was loaded.
+                TrayIconEvent::Enter { .. } => self.refresh_icon_size(),
+                _ => {}
+            }
+        }
+
+        while let Ok(event) = MenuEvent::receiver().try_recv() {
+            had_events = true;
+            if event.id == *self.pause.id() {
+                self.toggle_pause();
+            } else if event.id == *self.keep_display_on.id() {
+                save_setting(KEEP_DISPLAY_ON_VALUE, self.keep_display_on.is_checked());
+                self.apply();
+            } else if event.id == *self.keep_teams_active.id() {
+                save_setting(KEEP_TEAMS_ACTIVE_VALUE, self.keep_teams_active.is_checked());
+                self.apply();
+            } else if event.id == *self.rik_mode.id() {
+                save_setting(RIK_MODE_VALUE, self.rik_mode.is_checked());
+                self.apply();
+            } else if event.id == *self.start_with_windows.id() {
+                set_start_with_windows(self.start_with_windows.is_checked());
+                // Show what actually took effect, in case the registry write failed.
+                self.start_with_windows.set_checked(starts_with_windows());
+                save_setting(START_WITH_WINDOWS_VALUE, self.start_with_windows.is_checked());
+            } else if event.id == *self.about.id() {
+                show_about();
+            } else if event.id == *self.exit.id() && (self.paused || confirm_exit()) {
+                unsafe { PostQuitMessage(0) };
+            }
+        }
+
+        if had_events {
+            self.schedule_trim();
+        }
+    }
+
+    /// Called by the menu hook for a click at pt. If it's on a tick box, toggles
+    /// it and applies the change now, and returns true so the click is swallowed
+    /// and the menu stays open. A greyed tick box swallows the click and does
+    /// nothing.
+    fn toggle_in_menu(&mut self, pt: POINT) -> bool {
+        let menu = self.menu_handle as HMENU;
+        let position = unsafe { MenuItemFromPoint(null_mut(), menu, pt) };
+        let Ok(index) = usize::try_from(position) else {
+            return false;
+        };
+        if !self.tick_positions.get(index).copied().unwrap_or(false) {
+            return false;
+        }
+        let state = unsafe { GetMenuState(menu, index as u32, MF_BYPOSITION) };
+        if state & (MF_GRAYED | MF_DISABLED) == 0 {
+            // The same command the menu would send: the menu library flips the
+            // tick and queues the event, which is handled straight away.
+            let command = unsafe { GetMenuItemID(menu, position) };
+            unsafe { SendMessageW(self.tray.window_handle(), WM_COMMAND, command as usize, 0) };
+            self.handle_events();
+        }
+        true
+    }
+
     /// Trims memory once Zap has been quiet for TRIM_DELAY_MS. Calling it again
     /// before then restarts the countdown, so a burst of clicks trims once.
     fn schedule_trim(&mut self) {
