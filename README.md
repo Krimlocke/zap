@@ -21,6 +21,7 @@ Zap lives in the system tray as a white lightning bolt.
   - **Pause / Resume**
   - **Keep display on** (on by default): also stop the screen from turning off. On Modern Standby laptops a screen that turns off looks like sleep, which is why this starts on.
   - **Keep Teams active** (on by default): stops Microsoft Teams (and similar apps) showing you as Away. Once you haven't touched the keyboard or mouse for 99 seconds, Zap presses F15, and again every 99 seconds until you're back. F15 is a key almost no keyboard has and nothing uses, so it doesn't type or trigger anything. It never fires while you're using the PC. It can't work while the screen is locked, or while a window running as administrator is in front, because Windows blocks simulated input in both cases. Windows counts the key press as activity too, so while this is on and Zap isn't paused, your screen stays on and won't idle-lock even with "Keep display on" unticked; pause Zap or untick this if you want the screen to turn off. Check your workplace's policy on activity tools before relying on it.
+  - **Rik Mode** (off by default; only available while Keep Teams active is ticked): lets Teams go Away now and then, so it looks like you stepped away for a bit instead of being green all day. Every 45–75 minutes (random each time), the next time Zap would press F15 it takes a break instead: it stops pressing for 10–20 minutes, counted from your last input. Teams goes Away after 5 minutes, so you show as Away for roughly 5–15 minutes. When the break ends Zap presses F15, Teams comes back, and the next 45–75 minute gap starts. Breaks only happen while you're away from the PC. During a break Zap keeps the screen on, so it doesn't lock and stop Zap bringing Teams back. The tooltip reads "Zap: active, Rik Mode break" while one is running.
   - **Start with Windows** (on by default): runs `zap.exe` when you sign in, using the standard per-user `Run` registry entry, so it also appears in Task Manager's Startup apps. The very first time Zap runs, it turns this on for that copy of the exe, so run it first from where you want to keep it. After that your choice sticks, including turning it off in Task Manager. If you move the exe, tick it again to point at the new location.
   - **About Zap**
   - **Exit**: asks for confirmation (unless paused), then lets the computer sleep again.
@@ -31,6 +32,7 @@ Only one copy runs at a time. Your menu choices are remembered between runs; pau
 
 - **Staying awake:** Zap calls the Win32 `SetThreadExecutionState` API with `ES_CONTINUOUS | ES_SYSTEM_REQUIRED` (plus `ES_DISPLAY_REQUIRED` when "Keep display on" is ticked). Pausing clears the request.
 - **Teams:** this doesn't count as user activity, so on its own it doesn't stop Teams going Away. "Keep Teams active" uses a timer that reads `GetLastInputInfo` and sends an F15 key press with `SendInput` once input has been idle for 99 seconds. Each tick re-arms the timer for exactly the time left, so the press lands when the idle time reaches 99 seconds and repeats every 99 seconds while you're away (Teams itself goes Away after 5 minutes). The timer only exists while the option is on and Zap isn't paused.
+- **Rik Mode:** the same timer, which in a break is set for the break's end instead of the next press. While a break runs Zap adds `ES_DISPLAY_REQUIRED` to its power request whatever "Keep display on" says. The random times come from the random keys Rust's standard library gives each new hash map, so there's no extra dependency.
 - **Footprint:** Zap waits on the Windows message queue, so it uses no CPU while idle. Five seconds after starting, and after each click or menu action, it lets Windows move its idle memory out of RAM (`SetProcessWorkingSetSize`), so Task Manager shows it at roughly 60–100 KB, briefly a few hundred KB while you use it. Those pages come back instantly when needed, so nothing slows down.
 
 ### Where settings are stored
@@ -39,6 +41,7 @@ Only one copy runs at a time. Your menu choices are remembered between runs; pau
 |---|---|
 | Keep display on | `HKCU\Software\Zap\KeepDisplayOn` (DWORD) |
 | Keep Teams active | `HKCU\Software\Zap\KeepTeamsActive` (DWORD) |
+| Rik Mode | `HKCU\Software\Zap\RikMode` (DWORD) |
 | Start with Windows | `HKCU\Software\Microsoft\Windows\CurrentVersion\Run\Zap`, plus your last choice in `HKCU\Software\Zap\StartWithWindows` (DWORD; missing means Zap hasn't run yet) |
 
 To remove every trace of Zap, tick Start with Windows if it isn't already, then untick it (that removes the startup entry and any Task Manager on/off flag), quit Zap, delete `HKCU\Software\Zap` and delete the exe.

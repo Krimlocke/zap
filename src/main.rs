@@ -2,7 +2,10 @@
 
 #![windows_subsystem = "windows"]
 
+use std::collections::hash_map::RandomState;
+use std::hash::BuildHasher;
 use std::ptr::null_mut;
+use std::time::{Duration, Instant};
 
 use tray_icon::menu::{CheckMenuItem, Menu, MenuEvent, MenuItem, PredefinedMenuItem};
 use tray_icon::{Icon, MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent};
@@ -40,12 +43,21 @@ const ICON_PAUSED: u16 = 2;
 const SETTINGS_KEY: &str = "Software\\Zap";
 const KEEP_DISPLAY_ON_VALUE: &str = "KeepDisplayOn";
 const KEEP_TEAMS_ACTIVE_VALUE: &str = "KeepTeamsActive";
+const RIK_MODE_VALUE: &str = "RikMode";
 /// The user's last Start with Windows choice. Its absence marks a first run.
 const START_WITH_WINDOWS_VALUE: &str = "StartWithWindows";
 /// Teams shows you as Away after a few minutes without keyboard or mouse input.
 /// Zap presses F15 once input has been idle this long, and again every time
 /// another interval passes without input.
 const TEAMS_NUDGE_INTERVAL_MS: u32 = 99 * 1000;
+/// Rik Mode: how long Zap keeps Teams active between breaks, picked at random
+/// each time so breaks don't land at the same point every hour.
+const RIK_GAP_MIN: Duration = Duration::from_secs(45 * 60);
+const RIK_GAP_MAX: Duration = Duration::from_secs(75 * 60);
+/// Rik Mode: how long each break lasts, counted from the last input. Teams waits
+/// 5 minutes before going Away, so you show as Away for roughly 5 to 15 minutes.
+const RIK_BREAK_MIN: Duration = Duration::from_secs(10 * 60);
+const RIK_BREAK_MAX: Duration = Duration::from_secs(20 * 60);
 /// How long Zap waits after startup or the last click before trimming its memory.
 const TRIM_DELAY_MS: u32 = 5 * 1000;
 /// Per-user autostart entry, the same one Task Manager's Startup apps lists.
@@ -71,6 +83,7 @@ fn main() {
     // On by default: on Modern Standby laptops a dark screen looks like sleep.
     let display = load_setting(KEEP_DISPLAY_ON_VALUE).unwrap_or(true);
     let teams = load_setting(KEEP_TEAMS_ACTIVE_VALUE).unwrap_or(true);
+    let rik = load_setting(RIK_MODE_VALUE).unwrap_or(false);
     // Start with Windows defaults to on, applied once on the first run. After
     // that the Run entry is left alone, so unticking it (here or in Task
     // Manager) sticks, and test copies run from elsewhere don't take it over.
@@ -81,6 +94,7 @@ fn main() {
     let pause = MenuItem::new("Pause", true, None);
     let keep_display_on = CheckMenuItem::new("Keep display on", true, display, None);
     let keep_teams_active = CheckMenuItem::new("Keep Teams active", true, teams, None);
+    let rik_mode = CheckMenuItem::new("Rik Mode", teams, rik, None);
     let start_with_windows =
         CheckMenuItem::new("Start with Windows", true, starts_with_windows(), None);
     let about = MenuItem::new("About Zap", true, None);
@@ -91,6 +105,7 @@ fn main() {
         &pause,
         &keep_display_on,
         &keep_teams_active,
+        &rik_mode,
         &start_with_windows,
         &PredefinedMenuItem::separator(),
         &about,
@@ -112,9 +127,11 @@ fn main() {
         pause,
         keep_display_on,
         keep_teams_active,
+        rik_mode,
         paused: false,
         icon_size,
         teams_timer: 0,
+        rik: None,
         trim_timer: 0,
     };
     zap.apply();
@@ -176,6 +193,9 @@ fn main() {
             } else if event.id == *zap.keep_teams_active.id() {
                 save_setting(KEEP_TEAMS_ACTIVE_VALUE, zap.keep_teams_active.is_checked());
                 zap.apply();
+            } else if event.id == *zap.rik_mode.id() {
+                save_setting(RIK_MODE_VALUE, zap.rik_mode.is_checked());
+                zap.apply();
             } else if event.id == *start_with_windows.id() {
                 set_start_with_windows(start_with_windows.is_checked());
                 // Show what actually took effect, in case the registry write failed.
@@ -197,15 +217,27 @@ fn main() {
     unsafe { SetThreadExecutionState(ES_CONTINUOUS) };
 }
 
+/// Rik Mode lets Teams go Away now and then, so you look like you stepped away.
+#[derive(Clone, Copy)]
+enum Rik {
+    /// Keeping Teams active; the next break starts at the first nudge after this.
+    Waiting { break_at: Instant },
+    /// Not nudging until this time, then Teams is woken and the gap starts again.
+    OnBreak { until: Instant },
+}
+
 struct Zap {
     tray: TrayIcon,
     pause: MenuItem,
     keep_display_on: CheckMenuItem,
     keep_teams_active: CheckMenuItem,
+    rik_mode: CheckMenuItem,
     paused: bool,
     icon_size: u32,
     /// Thread timer ID for the Teams idle check, or 0 when it isn't running.
     teams_timer: usize,
+    /// Where Rik Mode is in its cycle, or None while it isn't running.
+    rik: Option<Rik>,
     /// One-shot thread timer ID for the next memory trim, or 0 when none is due.
     trim_timer: usize,
 }
@@ -230,19 +262,60 @@ impl Zap {
 
     /// Runs on each Teams timer tick: nudges if input has been idle for the
     /// whole interval, then re-arms the timer so the next tick lands exactly
-    /// when the idle time next reaches it. Returns true if it nudged.
+    /// when the idle time next reaches it. In Rik Mode it starts and ends
+    /// breaks instead of nudging when they're due. Returns true if it nudged.
     fn teams_tick(&mut self) -> bool {
         let idle = idle_ms();
+        let now = Instant::now();
         let due = idle >= TEAMS_NUDGE_INTERVAL_MS;
+
+        match self.rik {
+            Some(Rik::OnBreak { until }) if now < until => {
+                self.arm_teams_timer(duration_ms(until - now));
+                return false;
+            }
+            // Break over: start the next gap and fall through, so an idle PC
+            // is nudged straight away and Teams comes back.
+            Some(Rik::OnBreak { .. }) => self.start_rik_gap(now),
+            // Only start a break once you've been away long enough for a nudge;
+            // while you're using the PC a break would change nothing.
+            Some(Rik::Waiting { break_at }) if due && now >= break_at => {
+                // Count the break from your last input, which is when Teams'
+                // own 5-minute countdown started.
+                let length = random_between(RIK_BREAK_MIN, RIK_BREAK_MAX)
+                    .saturating_sub(Duration::from_millis(idle.into()));
+                self.rik = Some(Rik::OnBreak { until: now + length });
+                self.refresh_status();
+                self.arm_teams_timer(duration_ms(length));
+                return false;
+            }
+            _ => {}
+        }
+
         let nudged = due && nudge();
         let delay = if due {
             TEAMS_NUDGE_INTERVAL_MS
         } else {
             TEAMS_NUDGE_INTERVAL_MS - idle
         };
-        // Passing the existing ID resets that timer instead of creating another.
-        self.teams_timer = unsafe { SetTimer(null_mut(), self.teams_timer, delay, None) };
+        self.arm_teams_timer(delay);
         nudged
+    }
+
+    /// Starts or resets the Teams timer. Passing the existing ID resets that
+    /// timer instead of creating another.
+    fn arm_teams_timer(&mut self, delay_ms: u32) {
+        self.teams_timer = unsafe { SetTimer(null_mut(), self.teams_timer, delay_ms, None) };
+    }
+
+    fn start_rik_gap(&mut self, now: Instant) {
+        let gap = random_between(RIK_GAP_MIN, RIK_GAP_MAX);
+        self.rik = Some(Rik::Waiting { break_at: now + gap });
+        self.refresh_status();
+    }
+
+    fn on_rik_break(&self) -> bool {
+        matches!(self.rik, Some(Rik::OnBreak { .. }))
     }
 
     fn toggle_pause(&mut self) {
@@ -250,18 +323,23 @@ impl Zap {
         self.apply();
     }
 
-    /// Brings the power request, Teams timer, icon, tooltip and menu in line with
-    /// the current state.
+    /// Brings the power request, Teams timer, Rik Mode, icon, tooltip and menu
+    /// in line with the current state.
     fn apply(&mut self) {
-        if self.paused {
-            unsafe { SetThreadExecutionState(ES_CONTINUOUS) };
-        } else {
-            set_awake(self.keep_display_on.is_checked());
-        }
-
         // The timer only runs while it's needed, so Zap otherwise never wakes up.
         let want_timer = !self.paused && self.keep_teams_active.is_checked();
-        if want_timer && self.teams_timer == 0 {
+        let want_rik = want_timer && self.rik_mode.is_checked();
+        self.rik_mode.set_enabled(self.keep_teams_active.is_checked());
+
+        let was_on_break = self.on_rik_break();
+        if !want_rik {
+            self.rik = None;
+        } else if self.rik.is_none() {
+            self.start_rik_gap(Instant::now());
+        }
+
+        // Also re-checks straight away when Rik Mode is turned off mid-break.
+        if want_timer && (self.teams_timer == 0 || was_on_break && !self.on_rik_break()) {
             self.teams_tick();
         } else if !want_timer && self.teams_timer != 0 {
             unsafe { KillTimer(null_mut(), self.teams_timer) };
@@ -269,9 +347,28 @@ impl Zap {
         }
 
         let _ = self.tray.set_icon(Some(load_icon(self.icon_id(), self.icon_size)));
-        let state = if self.paused { "inactive" } else { "active" };
-        let _ = self.tray.set_tooltip(Some(format!("{APP_NAME}: {state}")));
         self.pause.set_text(if self.paused { "Resume" } else { "Pause" });
+        self.refresh_status();
+    }
+
+    /// Updates the power request and tooltip, which change when a Rik Mode
+    /// break starts or ends as well as from the menu.
+    fn refresh_status(&self) {
+        if self.paused {
+            unsafe { SetThreadExecutionState(ES_CONTINUOUS) };
+        } else {
+            // During a break nothing presses a key, so keep the screen on to stop
+            // it locking, which would block the nudge that brings Teams back.
+            set_awake(self.keep_display_on.is_checked() || self.on_rik_break());
+        }
+        let state = if self.paused {
+            "inactive"
+        } else if self.on_rik_break() {
+            "active, Rik Mode break"
+        } else {
+            "active"
+        };
+        let _ = self.tray.set_tooltip(Some(format!("{APP_NAME}: {state}")));
     }
 
     fn refresh_icon_size(&mut self) {
@@ -298,6 +395,19 @@ fn set_awake(keep_display_on: bool) {
         flags |= ES_DISPLAY_REQUIRED;
     }
     unsafe { SetThreadExecutionState(flags) };
+}
+
+/// A random duration from min to max, using the randomly seeded keys std gives
+/// each new hasher, so Zap needs no extra dependency.
+fn random_between(min: Duration, max: Duration) -> Duration {
+    let span = (max - min).as_millis() as u64;
+    let random = RandomState::new().hash_one(0u8);
+    min + Duration::from_millis(random % (span + 1))
+}
+
+/// A duration as timer milliseconds, at least 1.
+fn duration_ms(d: Duration) -> u32 {
+    d.as_millis().clamp(1, u32::MAX.into()) as u32
 }
 
 /// Milliseconds since the last keyboard or mouse input. If Windows can't say,
