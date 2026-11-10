@@ -5,7 +5,8 @@
 use std::cell::RefCell;
 use std::collections::hash_map::RandomState;
 use std::hash::BuildHasher;
-use std::ptr::null_mut;
+use std::ptr::{null, null_mut};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use tray_icon::menu::{
@@ -13,15 +14,19 @@ use tray_icon::menu::{
 };
 use tray_icon::{Icon, MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent};
 use windows_sys::Win32::Foundation::{
-    GetLastError, ERROR_ALREADY_EXISTS, ERROR_SUCCESS, LPARAM, LRESULT, POINT, WPARAM,
+    GetLastError, ERROR_ALREADY_EXISTS, ERROR_SUCCESS, HWND, LPARAM, LRESULT, POINT, WPARAM,
 };
 use windows_sys::Win32::Graphics::Gdi::InvalidateRect;
+use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::System::Power::{
     SetThreadExecutionState, ES_CONTINUOUS, ES_DISPLAY_REQUIRED, ES_SYSTEM_REQUIRED,
 };
 use windows_sys::Win32::System::Registry::{
     RegDeleteKeyValueW, RegGetValueW, RegSetKeyValueW, HKEY_CURRENT_USER, REG_DWORD, REG_SZ,
     RRF_RT_REG_BINARY, RRF_RT_REG_DWORD, RRF_RT_REG_SZ,
+};
+use windows_sys::Win32::System::RemoteDesktop::{
+    WTSRegisterSessionNotification, NOTIFY_FOR_THIS_SESSION,
 };
 use windows_sys::Win32::System::SystemInformation::GetTickCount;
 use windows_sys::Win32::System::Threading::{
@@ -36,12 +41,13 @@ use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     LASTINPUTINFO, VK_F15,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    CallNextHookEx, DispatchMessageW, FindWindowW, GetMenuItemID, GetMenuState, GetMessageW,
-    GetSystemMetrics, KillTimer, MenuItemFromPoint, MessageBoxW, PostQuitMessage, SendMessageW,
-    SetTimer, SetWindowsHookExW, TranslateMessage, HMENU, IDYES, MB_DEFBUTTON2,
-    MB_ICONINFORMATION, MB_ICONWARNING, MB_OK, MB_SETFOREGROUND, MB_YESNO, MF_BYPOSITION,
-    MF_DISABLED, MF_GRAYED, MSG, MSGF_MENU, SM_CXSMICON, WH_MSGFILTER, WM_COMMAND,
-    WM_LBUTTONUP, WM_TIMER,
+    CallNextHookEx, CreateWindowExW, DefWindowProcW, DispatchMessageW, FindWindowW, GetMenuItemID,
+    GetMenuState, GetMessageW, GetSystemMetrics, KillTimer, MenuItemFromPoint, MessageBoxW,
+    PostQuitMessage, RegisterClassW, SendMessageW, SetTimer, SetWindowsHookExW, TranslateMessage,
+    HMENU, IDYES, MB_DEFBUTTON2, MB_ICONINFORMATION, MB_ICONWARNING, MB_OK, MB_SETFOREGROUND,
+    MB_YESNO, MF_BYPOSITION, MF_DISABLED, MF_GRAYED, MSG, MSGF_MENU, SM_CXSMICON, WH_MSGFILTER,
+    WM_COMMAND, WM_LBUTTONUP, WM_TIMER, WM_WTSSESSION_CHANGE, WNDCLASSW, WTS_SESSION_LOCK,
+    WTS_SESSION_UNLOCK,
 };
 
 const APP_NAME: &str = "Zap";
@@ -156,12 +162,14 @@ fn main() {
         teams_timer: 0,
         rik: None,
         trim_timer: 0,
+        locked: false,
     };
     ZAP.with_borrow_mut(|cell| {
         let zap = cell.insert(zap);
         zap.apply();
         zap.schedule_trim();
     });
+    watch_session_lock();
 
     // Sees the open tray menu's clicks so tick boxes can toggle without closing it.
     // Only this thread's menus and dialogs pass through it.
@@ -195,6 +203,59 @@ fn main() {
 thread_local! {
     /// The app's state, kept here so the menu hook can reach it.
     static ZAP: RefCell<Option<Zap>> = const { RefCell::new(None) };
+}
+
+/// Whether the session is locked, as Windows last reported it. Kept apart from
+/// Zap so a report that arrives while Zap is busy (a message box is open) isn't
+/// lost; Zap catches up after the next message it handles.
+static LOCKED: AtomicBool = AtomicBool::new(false);
+
+/// Creates a hidden window that Windows tells when the session locks or unlocks.
+fn watch_session_lock() {
+    let class = wide("ZapSession");
+    unsafe {
+        let instance = GetModuleHandleW(null());
+        let mut wc: WNDCLASSW = std::mem::zeroed();
+        wc.lpfnWndProc = Some(session_proc);
+        wc.hInstance = instance;
+        wc.lpszClassName = class.as_ptr();
+        RegisterClassW(&wc);
+        // A plain hidden top-level window, not a message-only one, which is
+        // the documented way to receive session change notifications.
+        let window = CreateWindowExW(
+            0,
+            class.as_ptr(),
+            null(),
+            0,
+            0,
+            0,
+            0,
+            0,
+            null_mut(),
+            null_mut(),
+            instance,
+            null(),
+        );
+        WTSRegisterSessionNotification(window, NOTIFY_FOR_THIS_SESSION);
+    }
+}
+
+unsafe extern "system" fn session_proc(
+    window: HWND,
+    message: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+) -> LRESULT {
+    if message == WM_WTSSESSION_CHANGE {
+        match wparam as u32 {
+            WTS_SESSION_LOCK => LOCKED.store(true, Ordering::Relaxed),
+            WTS_SESSION_UNLOCK => LOCKED.store(false, Ordering::Relaxed),
+            _ => return 0,
+        }
+        with_zap(Zap::sync_lock);
+        return 0;
+    }
+    unsafe { DefWindowProcW(window, message, wparam, lparam) }
 }
 
 /// Runs f on the app's state, or does nothing if it's already in use, as it is
@@ -251,6 +312,10 @@ struct Zap {
     rik: Option<Rik>,
     /// One-shot thread timer ID for the next memory trim, or 0 when none is due.
     trim_timer: usize,
+    /// The lock state last applied. While locked Zap doesn't nudge: Teams shows
+    /// you as Away on lock anyway, and each press would count as activity and
+    /// stop the locked screen turning off.
+    locked: bool,
 }
 
 impl Zap {
@@ -264,8 +329,18 @@ impl Zap {
         }
     }
 
+    /// Applies a lock or unlock that hasn't been applied yet.
+    fn sync_lock(&mut self) {
+        let locked = LOCKED.load(Ordering::Relaxed);
+        if locked != self.locked {
+            self.locked = locked;
+            self.apply();
+        }
+    }
+
     /// Handles queued tray clicks and menu choices.
     fn handle_events(&mut self) {
+        self.sync_lock();
         let mut had_events = false;
         while let Ok(event) = TrayIconEvent::receiver().try_recv() {
             had_events = true;
@@ -428,7 +503,9 @@ impl Zap {
     /// in line with the current state.
     fn apply(&mut self) {
         // The timer only runs while it's needed, so Zap otherwise never wakes up.
-        let want_timer = !self.paused && self.keep_teams_active.is_checked();
+        // Locking stops it and ends any Rik Mode cycle (a lock is a real break);
+        // unlocking starts both afresh.
+        let want_timer = !self.paused && !self.locked && self.keep_teams_active.is_checked();
         let want_rik = want_timer && self.rik_mode.is_checked();
         self.rik_mode.set_enabled(self.keep_teams_active.is_checked());
 
