@@ -98,7 +98,9 @@ fn main() {
     // On by default: on Modern Standby laptops a dark screen looks like sleep.
     let display = load_setting(KEEP_DISPLAY_ON_VALUE).unwrap_or(true);
     let teams = load_setting(KEEP_TEAMS_ACTIVE_VALUE).unwrap_or(true);
-    let rik = load_setting(RIK_MODE_VALUE).unwrap_or(false);
+    // Rik Mode only runs with Keep Teams active, and the menu keeps the two in
+    // step. A Rik Mode tick saved without it (by an older version) is dropped.
+    let rik = load_setting(RIK_MODE_VALUE).unwrap_or(false) && teams;
     // Start with Windows defaults to on, applied once on the first run. After
     // that the Run entry is left alone, so unticking it (here or in Task
     // Manager) sticks, and test copies run from elsewhere don't take it over.
@@ -109,7 +111,7 @@ fn main() {
     let pause = MenuItem::new("Pause", true, None);
     let keep_display_on = CheckMenuItem::new("Keep display on", true, display, None);
     let keep_teams_active = CheckMenuItem::new("Keep Teams active", true, teams, None);
-    let rik_mode = CheckMenuItem::new("Rik Mode", teams, rik, None);
+    let rik_mode = CheckMenuItem::new("Rik Mode", true, rik, None);
     let start_with_windows =
         CheckMenuItem::new("Start with Windows", true, starts_with_windows(), None);
     let about = MenuItem::new("About Zap", true, None);
@@ -373,10 +375,22 @@ impl Zap {
                 save_setting(KEEP_DISPLAY_ON_VALUE, self.keep_display_on.is_checked());
                 self.apply();
             } else if event.id == *self.keep_teams_active.id() {
-                save_setting(KEEP_TEAMS_ACTIVE_VALUE, self.keep_teams_active.is_checked());
+                let on = self.keep_teams_active.is_checked();
+                save_setting(KEEP_TEAMS_ACTIVE_VALUE, on);
+                // Rik Mode can't run without it, so it goes off too.
+                if !on && self.rik_mode.is_checked() {
+                    self.rik_mode.set_checked(false);
+                    save_setting(RIK_MODE_VALUE, false);
+                }
                 self.apply();
             } else if event.id == *self.rik_mode.id() {
-                save_setting(RIK_MODE_VALUE, self.rik_mode.is_checked());
+                let on = self.rik_mode.is_checked();
+                save_setting(RIK_MODE_VALUE, on);
+                // Rik Mode works by pausing the Teams nudges, so it turns them on.
+                if on && !self.keep_teams_active.is_checked() {
+                    self.keep_teams_active.set_checked(true);
+                    save_setting(KEEP_TEAMS_ACTIVE_VALUE, true);
+                }
                 self.apply();
             } else if event.id == *self.start_with_windows.id() {
                 set_start_with_windows(self.start_with_windows.is_checked());
@@ -507,7 +521,6 @@ impl Zap {
         // unlocking starts both afresh.
         let want_timer = !self.paused && !self.locked && self.keep_teams_active.is_checked();
         let want_rik = want_timer && self.rik_mode.is_checked();
-        self.rik_mode.set_enabled(self.keep_teams_active.is_checked());
 
         let was_on_break = self.on_rik_break();
         if !want_rik {
