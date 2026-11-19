@@ -548,9 +548,13 @@ impl Zap {
         if self.paused {
             unsafe { SetThreadExecutionState(ES_CONTINUOUS) };
         } else {
-            // During a break nothing presses a key, so keep the screen on to stop
-            // it locking, which would block the nudge that brings Teams back.
-            set_awake(self.keep_display_on.is_checked() || self.on_rik_break());
+            // Keep Teams active holds the screen on too: the F15 presses alone
+            // can't be relied on for that (Windows drops them while an elevated
+            // window is in front), and a screen that turns off and locks stops
+            // the nudges. This covers Rik Mode breaks, when nothing is pressed.
+            // Locking releases it, so a locked screen turns off as normal.
+            let teams_hold = self.keep_teams_active.is_checked() && !self.locked;
+            set_awake(self.keep_display_on.is_checked() || teams_hold);
         }
         let state = if self.paused {
             "inactive"
